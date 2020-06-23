@@ -204,16 +204,20 @@ impl BlockchainRPC {
         let script_hash = scripthash_from_value(params.get(0))?;
         let status = self.query.status(&script_hash, timeout).await?;
         let result = status.hash().map_or(Value::Null, |h| json!(hex::encode(h)));
-        self.status_hashes.lock().await.insert(script_hash, result.clone());
-        self.stats
-            .subscriptions
-            .set(self.status_hashes.lock().await.len() as i64);
+        if let None = self.status_hashes.lock().await.insert(script_hash, result.clone()) {
+            self.stats
+                .subscriptions
+                .inc();
+        }
         Ok(result)
     }
 
     pub async fn scripthash_unsubscribe(&self, params: &[Value]) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
         let removed = self.status_hashes.lock().await.remove(&scripthash).is_some();
+        if removed {
+            self.stats.subscriptions.dec();
+        }
         Ok(json!(removed))
     }
 

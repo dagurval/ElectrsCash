@@ -327,6 +327,9 @@ impl Connection {
                 e.display_chain().to_string()
             );
         }
+        self.stats
+            .subscriptions
+            .sub(self.status_hashes.len() as i64);
         debug!("[{}] shutting down connection", self.addr);
         let _ = self.stream.lock().await.shutdown(Shutdown::Both);
         if let Err(err) = child.join().expect("receiver panicked") {
@@ -431,6 +434,7 @@ impl RPC {
                 "# of scripthash subscriptions for node",
             )),
         });
+        stats.subscriptions.set(0);
 
         let notification = Channel::unbounded();
         RPC {
