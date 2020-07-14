@@ -1,5 +1,5 @@
 use bitcoin::blockdata::block::{Block, BlockHeader};
-use bitcoin::blockdata::transaction::{Transaction, TxIn, TxOut};
+use bitcoin::blockdata::transaction::{Transaction, TxIn};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin_hashes::Hash;
@@ -9,16 +9,17 @@ use std::sync::RwLock;
 
 use crate::cashaccount::CashAccountParser;
 use crate::daemon::Daemon;
+use crate::db::encode_varint_u64;
+use crate::db::outputs::TxOutRow;
 use crate::errors::*;
 use crate::metrics::{
     Counter, Gauge, HistogramOpts, HistogramTimer, HistogramVec, MetricOpts, Metrics,
 };
-use crate::scripthash::{compute_script_hash, full_hash, FullHash};
+use crate::scripthash::{full_hash, FullHash};
 use crate::signal::Waiter;
 use crate::store::{ReadStore, Row, WriteStore};
 use crate::util::{
     hash_prefix, spawn_thread, Bytes, HashPrefix, HeaderEntry, HeaderList, HeaderMap, SyncChannel,
-    HASH_PREFIX_LEN,
 };
 use bitcoin::BitcoinHash;
 
@@ -41,7 +42,7 @@ impl TxInRow {
             key: TxInKey {
                 code: b'I',
                 prev_hash_prefix: hash_prefix(&input.previous_output.txid[..]),
-                prev_index: encode_varint(input.previous_output.vout as u64),
+                prev_index: encode_varint_u64(input.previous_output.vout as u64),
             },
             txid_prefix: hash_prefix(&txid[..]),
         }
@@ -51,7 +52,7 @@ impl TxInRow {
         bincode::serialize(&TxInKey {
             code: b'I',
             prev_hash_prefix: hash_prefix(&txid[..]),
-            prev_index: encode_varint(output_index as u64),
+            prev_index: encode_varint_u64(output_index as u64),
         })
         .unwrap()
     }
@@ -65,71 +66,6 @@ impl TxInRow {
 
     pub fn from_row(row: &Row) -> TxInRow {
         bincode::deserialize(&row.key).expect("failed to parse TxInRow")
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TxOutKey {
-    code: u8,
-    pub script_hash_prefix: HashPrefix,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TxOutRow {
-    pub key: TxOutKey,
-    pub txid_prefix: HashPrefix,
-    output_index: Vec<u8>,
-    output_value: Vec<u8>,
-}
-
-fn encode_varint(value: u64) -> Vec<u8> {
-    let mut buff = unsigned_varint::encode::u64_buffer();
-    let encoded = unsigned_varint::encode::u64(value, &mut buff);
-    encoded.to_vec()
-}
-
-fn decode_varint(index: &[u8]) -> u64 {
-    unsigned_varint::decode::u64(&index[..]).unwrap().0
-}
-
-impl TxOutRow {
-    pub fn new(txid: &Txid, output: &TxOut, output_index: u64) -> TxOutRow {
-        TxOutRow {
-            key: TxOutKey {
-                code: b'O',
-                script_hash_prefix: hash_prefix(&compute_script_hash(&output.script_pubkey[..])),
-            },
-            txid_prefix: hash_prefix(&txid[..]),
-            output_index: encode_varint(output_index),
-            output_value: encode_varint(output.value),
-        }
-    }
-
-    pub fn filter(script_hash: &[u8]) -> Bytes {
-        bincode::serialize(&TxOutKey {
-            code: b'O',
-            script_hash_prefix: hash_prefix(&script_hash[..HASH_PREFIX_LEN]),
-        })
-        .unwrap()
-    }
-
-    pub fn to_row(&self) -> Row {
-        Row {
-            key: bincode::serialize(&self).unwrap(),
-            value: vec![],
-        }
-    }
-
-    pub fn from_row(row: &Row) -> TxOutRow {
-        bincode::deserialize(&row.key).expect("failed to parse TxOutRow key")
-    }
-
-    pub fn get_output_index(&self) -> u64 {
-        decode_varint(&self.output_index)
-    }
-
-    pub fn get_output_value(&self) -> u64 {
-        decode_varint(&self.output_value)
     }
 }
 
@@ -207,7 +143,7 @@ pub fn index_transaction<'a>(
         .output
         .iter()
         .enumerate()
-        .map(move |(i, output)| TxOutRow::new(&txid, &output, i as u64).to_row());
+        .map(move |(i, output)| TxOutRow::new(txid, &output, i as u32, height as u32).to_row());
 
     let cashaccount_row = match cashaccount {
         Some(cashaccount) => cashaccount.index_cashaccount(txn, height as u32),

@@ -52,7 +52,7 @@ impl BlockchainRPC {
     pub fn address_get_first_use(&self, params: &[Value]) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
         let scripthash = addr_to_scripthash(&addr)?;
-        get_first_use(&*self.query, &scripthash)
+        get_first_use(&*self.query, scripthash)
     }
     pub fn address_get_history(&self, params: &[Value], timeout: &TimeoutTrigger) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
@@ -160,7 +160,7 @@ impl BlockchainRPC {
 
     pub fn scripthash_get_first_use(&self, params: &[Value]) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        get_first_use(&*self.query, &scripthash)
+        get_first_use(&*self.query, scripthash)
     }
 
     pub fn scripthash_get_history(

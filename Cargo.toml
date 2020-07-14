@@ -50,6 +50,7 @@ cashaccount-sys = ">=0.1"
 c_fixed_string = "0.2"
 version-compare = "0.0.10"
 bitcoincash-addr = "0.5.1"
+futures = "0.3"
 
 [build-dependencies]
 configure_me_codegen = "0.3.12"

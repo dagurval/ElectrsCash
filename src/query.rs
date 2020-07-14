@@ -6,6 +6,7 @@ use bitcoin_hashes::hex::ToHex;
 use bitcoin_hashes::Hash;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
+use futures::executor::block_on;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -13,14 +14,15 @@ use std::sync::{Arc, RwLock};
 use crate::app::App;
 use crate::cache::TransactionCache;
 use crate::cashaccount::{txids_by_cashaccount, CashAccountParser};
+use crate::db::outputs::{get_txouts, TxOutRow};
 use crate::errors::*;
-use crate::index::{TxInRow, TxOutRow, TxRow};
+use crate::index::{TxInRow, TxRow};
 use crate::mempool::{Tracker, MEMPOOL_HEIGHT};
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
-use crate::scripthash::{compute_script_hash, FullHash};
+use crate::scripthash::FullHash;
 use crate::store::{ReadStore, Row};
 use crate::timeout::TimeoutTrigger;
-use crate::util::{hash_prefix, HashPrefix, HeaderEntry};
+use crate::util::{HashPrefix, HeaderEntry};
 
 pub enum ConfirmationState {
     Confirmed,
@@ -29,14 +31,33 @@ pub enum ConfirmationState {
 }
 
 pub struct FundingOutput {
-    pub txn_id: Txid,
-    pub height: u32,
-    pub output_index: usize,
-    pub value: u64,
-    pub state: ConfirmationState,
+    txout: TxOutRow,
+    state: ConfirmationState,
 }
 
-type OutPoint = (Txid, usize); // (txid, output_index)
+impl FundingOutput {
+    #[inline]
+    pub fn value(&self) -> u64 {
+        self.txout.get_output_value()
+    }
+
+    #[inline]
+    pub fn height(&self) -> u32 {
+        self.txout.get_confirmed_height()
+    }
+
+    #[inline]
+    pub fn txid(&self) -> &Txid {
+        self.txout.get_txid()
+    }
+
+    #[inline]
+    pub fn output_index(&self) -> u32 {
+        self.txout.get_output_index()
+    }
+}
+
+type OutPoint = (Txid, u32); // (txid, output_index)
 
 struct SpendingInput {
     txn_id: Txid,
@@ -52,18 +73,9 @@ pub struct Status {
 }
 
 fn calc_balance((funding, spending): &(Vec<FundingOutput>, Vec<SpendingInput>)) -> i64 {
-    let funded: u64 = funding.iter().map(|output| output.value).sum();
+    let funded: u64 = funding.iter().map(|output| output.value()).sum();
     let spent: u64 = spending.iter().map(|input| input.value).sum();
     funded as i64 - spent as i64
-}
-
-fn txn_has_output(txn: &Transaction, n: u64, scripthash_prefix: HashPrefix) -> bool {
-    let n = n as usize;
-    if txn.output.len() - 1 < n {
-        return false;
-    }
-    let hash = compute_script_hash(&txn.output[n].script_pubkey[..]);
-    hash_prefix(&hash) == scripthash_prefix
 }
 
 impl Status {
@@ -87,12 +99,12 @@ impl Status {
         let mut txns_map = HashMap::<Txid, i32>::new();
         for f in self.funding() {
             let height: i32 = match f.state {
-                ConfirmationState::Confirmed => f.height as i32,
+                ConfirmationState::Confirmed => f.height() as i32,
                 ConfirmationState::InMempool => 0,
                 ConfirmationState::UnconfirmedParent => -1,
             };
 
-            txns_map.insert(f.txn_id, height);
+            txns_map.insert(*f.txid(), height);
         }
         for s in self.spending() {
             let height: i32 = match s.state {
@@ -131,7 +143,7 @@ impl Status {
     pub fn unspent(&self) -> Vec<&FundingOutput> {
         let mut outputs_map = HashMap::<OutPoint, &FundingOutput>::new();
         for f in self.funding() {
-            outputs_map.insert((f.txn_id, f.output_index), f);
+            outputs_map.insert((*f.txid(), f.output_index()), f);
         }
         for s in self.spending() {
             if outputs_map.remove(&s.funding_output).is_none() {
@@ -142,7 +154,9 @@ impl Status {
             .into_iter()
             .map(|item| item.1) // a reference to unspent output
             .collect::<Vec<&FundingOutput>>();
-        outputs.sort_unstable_by_key(|out| out.height);
+
+        // TODO: Check cost of height (deserializes from varint)
+        outputs.sort_unstable_by_key(|out| out.height());
         outputs
     }
 
@@ -206,21 +220,13 @@ fn txrows_by_prefix(store: &dyn ReadStore, txid_prefix: HashPrefix) -> Vec<TxRow
         .collect()
 }
 
-fn txoutrows_by_script_hash(store: &dyn ReadStore, script_hash: &[u8]) -> Vec<TxOutRow> {
-    store
-        .scan(&TxOutRow::filter(script_hash))
-        .iter()
-        .map(|row| TxOutRow::from_row(row))
-        .collect()
-}
-
 fn txids_by_funding_output(
     store: &dyn ReadStore,
     txn_id: &Txid,
-    output_index: usize,
+    output_index: u32,
 ) -> Vec<HashPrefix> {
     store
-        .scan(&TxInRow::filter(&txn_id, output_index))
+        .scan(&TxInRow::filter(&txn_id, output_index as usize))
         .iter()
         .map(|row| TxInRow::from_row(row).txid_prefix)
         .collect()
@@ -230,22 +236,15 @@ pub struct Query {
     app: Arc<App>,
     tracker: RwLock<Tracker>,
     tx_cache: TransactionCache,
-    txid_limit: usize,
     duration: HistogramVec,
 }
 
 impl Query {
-    pub fn new(
-        app: Arc<App>,
-        metrics: &Metrics,
-        tx_cache: TransactionCache,
-        txid_limit: usize,
-    ) -> Arc<Query> {
+    pub fn new(app: Arc<App>, metrics: &Metrics, tx_cache: TransactionCache) -> Arc<Query> {
         Arc::new(Query {
             app,
             tracker: RwLock::new(Tracker::new(metrics)),
             tx_cache,
-            txid_limit,
             duration: metrics.histogram_vec(
                 HistogramOpts::new(
                     "electrs_query_duration",
@@ -281,7 +280,7 @@ impl Query {
         funding: &FundingOutput,
         timeout: &TimeoutTrigger,
     ) -> Result<Option<SpendingInput>> {
-        let spending_txns = txids_by_funding_output(store, &funding.txn_id, funding.output_index);
+        let spending_txns = txids_by_funding_output(store, funding.txid(), funding.output_index());
 
         if spending_txns.len() == 1 {
             let spender_txid = &spending_txns[0];
@@ -292,8 +291,8 @@ impl Query {
                 return Ok(Some(SpendingInput {
                     txn_id: txid,
                     height: txrows[0].height,
-                    funding_output: (funding.txn_id, funding.output_index),
-                    value: funding.value,
+                    funding_output: (*funding.txid(), funding.output_index()),
+                    value: funding.value(),
                     state: self.check_confirmation_state(&txid, txrows[0].height),
                 }));
             }
@@ -302,19 +301,19 @@ impl Query {
         // ambiguity, fetch from bitcoind to verify
         let spending_txns: Vec<TxnHeight> = self.load_txns_by_prefix(
             store,
-            txids_by_funding_output(store, &funding.txn_id, funding.output_index),
+            txids_by_funding_output(store, funding.txid(), funding.output_index()),
         )?;
         let mut spending_inputs = vec![];
         for t in &spending_txns {
             for input in t.txn.input.iter() {
-                if input.previous_output.txid == funding.txn_id
-                    && input.previous_output.vout == funding.output_index as u32
+                if input.previous_output.txid == *funding.txid()
+                    && input.previous_output.vout == funding.output_index()
                 {
                     spending_inputs.push(SpendingInput {
                         txn_id: t.txn.txid(),
                         height: t.height,
-                        funding_output: (funding.txn_id, funding.output_index),
-                        value: funding.value,
+                        funding_output: (*funding.txid(), funding.output_index()),
+                        value: funding.value(),
                         state: self.check_confirmation_state(&t.txn.txid(), t.height),
                     })
                 }
@@ -349,71 +348,23 @@ impl Query {
         }
     }
 
-    fn txoutrow_to_fundingoutput(
-        &self,
-        store: &dyn ReadStore,
-        txoutrow: &TxOutRow,
-        timeout: &TimeoutTrigger,
-    ) -> Result<FundingOutput> {
-        let txrow = self.lookup_tx_by_outrow(store, txoutrow, timeout)?;
-        let txid = txrow.get_txid();
-        Ok(FundingOutput {
-            txn_id: txid,
-            height: txrow.height,
-            output_index: txoutrow.get_output_index() as usize,
-            value: txoutrow.get_output_value(),
-            state: self.check_confirmation_state(&txid, txrow.height),
-        })
+    fn txoutrow_to_fundingoutput(&self, txout: TxOutRow) -> FundingOutput {
+        let state = self.check_confirmation_state(txout.get_txid(), txout.get_confirmed_height());
+        FundingOutput { txout, state }
     }
 
-    /// Lookup txrow using txid prefix, filter on output when there are
-    /// multiple matches.
-    fn lookup_tx_by_outrow(
+    async fn confirmed_status(
         &self,
-        store: &dyn ReadStore,
-        txout: &TxOutRow,
-        timeout: &TimeoutTrigger,
-    ) -> Result<TxRow> {
-        let mut txrows = txrows_by_prefix(store, txout.txid_prefix);
-        if txrows.len() == 1 {
-            return Ok(txrows.remove(0));
-        }
-        for txrow in txrows {
-            timeout.check()?;
-            let tx = self.load_txn(&txrow.get_txid(), None, Some(txrow.height))?;
-            if txn_has_output(&tx, txout.get_output_index(), txout.key.script_hash_prefix) {
-                return Ok(txrow);
-            }
-        }
-        Err("tx not in store".into())
-    }
-
-    fn confirmed_status(
-        &self,
-        script_hash: &FullHash,
+        script_hash: FullHash,
         timeout: &TimeoutTrigger,
     ) -> Result<(Vec<FundingOutput>, Vec<SpendingInput>)> {
         let mut spending = vec![];
         let read_store = self.app.read_store();
-        let funding = txoutrows_by_script_hash(read_store, script_hash);
-        timeout.check()?;
-        let funding: Result<Vec<FundingOutput>> = funding
-            .iter()
-            .map(|outrow| self.txoutrow_to_fundingoutput(read_store, outrow, timeout))
+        let funding: Vec<FundingOutput> = get_txouts(read_store, script_hash)
+            .await
+            .into_iter()
+            .map(|outrow| self.txoutrow_to_fundingoutput(outrow))
             .collect();
-
-        if let Err(e) = funding {
-            return Err(e);
-        }
-        let funding = funding.unwrap();
-
-        // if the limit is enabled
-        if self.txid_limit > 0 && funding.len() > self.txid_limit {
-            bail!(
-                "{}+ transactions found, query may take a long time",
-                funding.len()
-            );
-        }
 
         for funding_output in &funding {
             timeout.check()?;
@@ -424,24 +375,20 @@ impl Query {
         Ok((funding, spending))
     }
 
-    fn mempool_status(
+    async fn mempool_status(
         &self,
-        script_hash: &FullHash,
+        script_hash: FullHash,
         confirmed_funding: &[FundingOutput],
         timeout: &TimeoutTrigger,
     ) -> Result<(Vec<FundingOutput>, Vec<SpendingInput>)> {
         let mut spending = vec![];
         let tracker = self.tracker.read().unwrap();
 
-        let funding = txoutrows_by_script_hash(tracker.index(), script_hash);
-        let funding: Result<Vec<FundingOutput>> = funding
-            .iter()
-            .map(|outrow| self.txoutrow_to_fundingoutput(tracker.index(), outrow, timeout))
+        let funding: Vec<FundingOutput> = get_txouts(tracker.index(), script_hash)
+            .await
+            .into_iter()
+            .map(|txout| self.txoutrow_to_fundingoutput(txout))
             .collect();
-        if let Err(e) = funding {
-            return Err(e);
-        }
-        let funding = funding.unwrap();
 
         // // TODO: dedup outputs (somehow) both confirmed and in mempool (e.g. reorg?)
         for funding_output in funding.iter().chain(confirmed_funding.iter()) {
@@ -460,8 +407,7 @@ impl Query {
             .duration
             .with_label_values(&["confirmed_status"])
             .start_timer();
-        let confirmed = self
-            .confirmed_status(script_hash, timeout)
+        let confirmed = block_on(self.confirmed_status(*script_hash, timeout))
             .chain_err(|| "failed to get confirmed status")?;
         timer.observe_duration();
 
@@ -469,8 +415,7 @@ impl Query {
             .duration
             .with_label_values(&["mempool_status"])
             .start_timer();
-        let mempool = self
-            .mempool_status(script_hash, &confirmed.0, timeout)
+        let mempool = block_on(self.mempool_status(*script_hash, &confirmed.0, timeout))
             .chain_err(|| "failed to get mempool status")?;
         timer.observe_duration();
 
@@ -735,29 +680,17 @@ impl Query {
     }
 
     /// Find first outputs to scripthash
-    pub fn scripthash_first_use(&self, scripthash: &FullHash) -> Result<(u32, Txid)> {
+    pub fn scripthash_first_use(&self, scripthash: FullHash) -> Result<(u32, Txid)> {
         let get_tx = |store| {
-            let rows = txoutrows_by_script_hash(store, scripthash);
-            let mut txs: Vec<TxRow> = rows
-                .iter()
-                .map(|p| txrows_by_prefix(store, p.txid_prefix))
-                .flatten()
-                .collect();
+            // TODO: Add arg to fetch at most 1 result.
+            let rows = block_on(get_txouts(store, scripthash));
 
-            txs.sort_unstable_by(|a, b| a.height.cmp(&b.height));
-
-            for txrow in txs.drain(..) {
-                // verify that tx contains scripthash as output
-                let txid = Txid::from_slice(&txrow.key.txid[..]).expect("invalid txid");
-                let tx = self.load_txn(&txid, None, Some(txrow.height))?;
-
-                for o in tx.output.iter() {
-                    if compute_script_hash(&o.script_pubkey[..]) == *scripthash {
-                        return Ok((txrow.height, txid));
-                    }
-                }
+            if !rows.is_empty() {
+                let txout = &rows[0];
+                Ok((txout.get_confirmed_height(), *txout.get_txid()))
+            } else {
+                Ok((0, Txid::default()))
             }
-            Ok((0, Txid::default()))
         };
 
         // Look at blockchain first

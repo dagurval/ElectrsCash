@@ -16,6 +16,7 @@ pub mod cache;
 pub mod cashaccount;
 pub mod config;
 pub mod daemon;
+pub mod db;
 pub mod def;
 pub mod errors;
 pub mod fake;

@@ -10,10 +10,10 @@ use serde_json::Value;
 
 fn unspent_to_json(out: &FundingOutput) -> Value {
     json!({
-        "height": if out.height == MEMPOOL_HEIGHT { 0 } else { out.height },
-        "tx_pos": out.output_index,
-        "tx_hash": out.txn_id.to_hex(),
-        "value": out.value,
+        "height": if out.height() == MEMPOOL_HEIGHT { 0 } else { out.height() },
+        "tx_pos": out.output_index(),
+        "tx_hash": out.txid().to_hex(),
+        "value": out.value(),
     })
 }
 
@@ -39,7 +39,7 @@ pub fn get_balance(
     }))
 }
 
-pub fn get_first_use(query: &Query, scripthash: &FullHash) -> Result<Value> {
+pub fn get_first_use(query: &Query, scripthash: FullHash) -> Result<Value> {
     let firstuse = query.scripthash_first_use(scripthash)?;
     if firstuse.0 == 0 {
         return Err(ErrorKind::RpcError(
