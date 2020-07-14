@@ -27,20 +27,20 @@ fn unspent_from_status(status: &Status) -> Value {
     ))
 }
 
-pub fn get_balance(
+pub async fn get_balance(
     query: &Query,
     scripthash: &FullHash,
     timeout: &TimeoutTrigger,
 ) -> Result<Value> {
-    let status = query.status(&scripthash, timeout)?;
+    let status = query.status(&scripthash, timeout).await?;
     Ok(json!({
         "confirmed": status.confirmed_balance(),
         "unconfirmed": status.mempool_balance()
     }))
 }
 
-pub fn get_first_use(query: &Query, scripthash: FullHash) -> Result<Value> {
-    let firstuse = query.scripthash_first_use(scripthash)?;
+pub async fn get_first_use(query: &Query, scripthash: FullHash) -> Result<Value> {
+    let firstuse = query.scripthash_first_use(scripthash).await?;
     if firstuse.0 == 0 {
         return Err(ErrorKind::RpcError(
             RpcErrorCode::NotFound,
@@ -73,12 +73,12 @@ pub fn get_first_use(query: &Query, scripthash: FullHash) -> Result<Value> {
         "tx_hash": firstuse.1.to_hex()
     }))
 }
-pub fn get_history(
+pub async fn get_history(
     query: &Query,
     scripthash: &FullHash,
     timeout: &TimeoutTrigger,
 ) -> Result<Value> {
-    let status = query.status(&scripthash, timeout)?;
+    let status = query.status(&scripthash, timeout).await?;
     Ok(json!(Value::Array(
         status
             .history()
@@ -88,12 +88,14 @@ pub fn get_history(
     )))
 }
 
-pub fn listunspent(
+pub async fn listunspent(
     query: &Query,
     scripthash: &FullHash,
     timeout: &TimeoutTrigger,
 ) -> Result<Value> {
-    Ok(unspent_from_status(&query.status(scripthash, timeout)?))
+    Ok(unspent_from_status(
+        &query.status(scripthash, timeout).await?,
+    ))
 }
 
 #[cfg(test)]

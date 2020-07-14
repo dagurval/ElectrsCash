@@ -197,33 +197,34 @@ impl Tracker {
         &self.index
     }
 
-    pub fn update(&mut self, daemon: &Daemon) -> Result<HashSet<Txid>> {
+    pub async fn update(&mut self, daemon: &Daemon) -> Result<HashSet<Txid>> {
         // set of transactions where a change has occurred (either new or removed)
         let mut changed_txs: HashSet<Txid> = HashSet::new();
 
         let timer = self.stats.start_timer("fetch");
         let new_txids = daemon
             .getmempooltxids()
+            .await
             .chain_err(|| "failed to update mempool from daemon")?;
         let old_txids = HashSet::from_iter(self.items.keys().cloned());
         timer.observe_duration();
 
         let timer = self.stats.start_timer("add");
         let txids_iter = new_txids.difference(&old_txids);
-        let entries: Vec<(&Txid, MempoolEntry)> = txids_iter
-            .filter_map(|txid| {
-                match daemon.getmempoolentry(txid) {
-                    Ok(entry) => Some((txid, entry)),
-                    Err(err) => {
-                        warn!("no mempool entry {}: {}", txid, err); // e.g. new block or RBF
-                        None // ignore this transaction for now
-                    }
+        let mut entries: Vec<(&Txid, MempoolEntry)> = vec![];
+        for txid in txids_iter {
+            match daemon.getmempoolentry(txid).await {
+                Ok(entry) => entries.push((txid, entry)),
+                Err(err) => {
+                    warn!("no mempool entry {}: {}", txid, err);
+                    // e.g. new block or RBF
+                    // ignore this transaction for now
                 }
-            })
-            .collect();
+            }
+        }
         if !entries.is_empty() {
             let txids: Vec<&Txid> = entries.iter().map(|(txid, _)| *txid).collect();
-            let txs = match daemon.gettransactions(&txids) {
+            let txs = match daemon.gettransactions(&txids).await {
                 Ok(txs) => txs,
                 Err(err) => {
                     // e.g. new block or RBF

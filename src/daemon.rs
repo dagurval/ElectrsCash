@@ -98,7 +98,7 @@ fn parse_jsonrpc_reply(mut reply: Value, method: &str, expected_id: u64) -> Resu
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct BlockchainInfo {
+pub struct BlockchainInfo {
     chain: String,
     blocks: u32,
     headers: u32,
@@ -316,7 +316,7 @@ impl Daemon {
             )?),
             message_id: Counter::new(),
             blocktxids_cache,
-            signal: signal.clone(),
+            signal,
             latency: metrics.histogram_vec(
                 HistogramOpts::new(
                     "electrscash_daemon_rpc",
@@ -330,30 +330,6 @@ impl Daemon {
                 &["method", "dir"],
             ),
         };
-        let network_info = daemon.getnetworkinfo()?;
-        info!("{:?}", network_info);
-        if network_info.version < 16_00_00 {
-            bail!(
-                "{} is not supported - please use bitcoind 0.16+",
-                network_info.subversion,
-            )
-        }
-        let blockchain_info = daemon.getblockchaininfo()?;
-        info!("{:?}", blockchain_info);
-        if blockchain_info.pruned {
-            bail!("pruned node is not supported (use '-prune=0' bitcoind flag)".to_owned())
-        }
-        loop {
-            let info = daemon.getblockchaininfo()?;
-            if !info.initialblockdownload {
-                break;
-            }
-            warn!(
-                "wait until IBD is over: headers={} blocks={} progress={}",
-                info.headers, info.blocks, info.verificationprogress
-            );
-            signal.wait(Duration::from_secs(3))?;
-        }
         Ok(daemon)
     }
 
@@ -387,7 +363,7 @@ impl Daemon {
         self.network.magic()
     }
 
-    fn call_jsonrpc(&self, method: &str, request: &Value) -> Result<Value> {
+    async fn call_jsonrpc(&self, method: &str, request: &Value) -> Result<Value> {
         let mut conn = self.conn.lock().unwrap();
         let timer = self.latency.with_label_values(&[method]).start_timer();
         let request = request.to_string();
@@ -404,14 +380,18 @@ impl Daemon {
         Ok(result)
     }
 
-    fn handle_request_batch(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
+    async fn handle_request_batch(
+        &self,
+        method: &str,
+        params_list: &[Value],
+    ) -> Result<Vec<Value>> {
         let id = self.message_id.next();
         let reqs = params_list
             .iter()
             .map(|params| json!({"method": method, "params": params, "id": id}))
             .collect();
         let mut results = vec![];
-        let mut replies = self.call_jsonrpc(method, &reqs)?;
+        let mut replies = self.call_jsonrpc(method, &reqs).await?;
         if let Some(replies_vec) = replies.as_array_mut() {
             for reply in replies_vec {
                 results.push(parse_jsonrpc_reply(reply.take(), method, id)?)
@@ -421,9 +401,9 @@ impl Daemon {
         bail!("non-array replies: {:?}", replies);
     }
 
-    fn retry_request_batch(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
+    async fn retry_request_batch(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
         loop {
-            match self.handle_request_batch(method, params_list) {
+            match self.handle_request_batch(method, params_list).await {
                 Err(Error(ErrorKind::Connection(msg), _)) => {
                     warn!("reconnecting to bitcoind: {}", msg);
                     self.signal.wait(Duration::from_secs(3))?;
@@ -436,69 +416,75 @@ impl Daemon {
         }
     }
 
-    fn request(&self, method: &str, params: Value) -> Result<Value> {
-        let mut values = self.retry_request_batch(method, &[params])?;
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let mut values = self.retry_request_batch(method, &[params]).await?;
         assert_eq!(values.len(), 1);
         Ok(values.remove(0))
     }
 
-    fn requests(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
-        self.retry_request_batch(method, params_list)
+    async fn requests(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
+        self.retry_request_batch(method, params_list).await
     }
 
     // bitcoind JSONRPC API:
 
-    fn getblockchaininfo(&self) -> Result<BlockchainInfo> {
-        let info: Value = self.request("getblockchaininfo", json!([]))?;
+    pub async fn getblockchaininfo(&self) -> Result<BlockchainInfo> {
+        let info: Value = self.request("getblockchaininfo", json!([])).await?;
         Ok(from_value(info).chain_err(|| "invalid blockchain info")?)
     }
 
-    fn getnetworkinfo(&self) -> Result<NetworkInfo> {
-        let info: Value = self.request("getnetworkinfo", json!([]))?;
+    async fn getnetworkinfo(&self) -> Result<NetworkInfo> {
+        let info: Value = self.request("getnetworkinfo", json!([])).await?;
         Ok(from_value(info).chain_err(|| "invalid network info")?)
     }
 
-    pub fn get_subversion(&self) -> Result<String> {
-        Ok(self.getnetworkinfo()?.subversion)
+    pub async fn get_subversion(&self) -> Result<String> {
+        Ok(self.getnetworkinfo().await?.subversion)
     }
 
-    pub fn get_relayfee(&self) -> Result<f64> {
-        Ok(self.getnetworkinfo()?.relayfee)
+    pub async fn get_relayfee(&self) -> Result<f64> {
+        Ok(self.getnetworkinfo().await?.relayfee)
     }
 
-    pub fn getbestblockhash(&self) -> Result<BlockHash> {
-        parse_hash(&self.request("getbestblockhash", json!([]))?).chain_err(|| "invalid blockhash")
+    pub async fn getbestblockhash(&self) -> Result<BlockHash> {
+        parse_hash(&self.request("getbestblockhash", json!([])).await?)
+            .chain_err(|| "invalid blockhash")
     }
 
-    pub fn getblockheader(&self, blockhash: &BlockHash) -> Result<BlockHeader> {
-        header_from_value(self.request(
-            "getblockheader",
-            json!([blockhash.to_hex(), /*verbose=*/ false]),
-        )?)
+    pub async fn getblockheader(&self, blockhash: &BlockHash) -> Result<BlockHeader> {
+        header_from_value(
+            self.request(
+                "getblockheader",
+                json!([blockhash.to_hex(), /*verbose=*/ false]),
+            )
+            .await?,
+        )
     }
 
-    pub fn getblockheaders(&self, heights: &[usize]) -> Result<Vec<BlockHeader>> {
+    pub async fn getblockheaders(&self, heights: &[usize]) -> Result<Vec<BlockHeader>> {
         let params_list: Vec<Value> = heights
             .iter()
             .map(|height| json!([height.to_string(), /*verbose=*/ false]))
             .collect();
         let mut result = vec![];
-        for h in self.requests("getblockheader", &params_list)? {
+        for h in self.requests("getblockheader", &params_list).await? {
             result.push(header_from_value(h)?);
         }
         Ok(result)
     }
 
-    pub fn getblock(&self, blockhash: &BlockHash) -> Result<Block> {
+    pub async fn getblock(&self, blockhash: &BlockHash) -> Result<Block> {
         let block = block_from_value(
-            self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ false]))?,
+            self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ false]))
+                .await?,
         )?;
         assert_eq!(block.bitcoin_hash(), *blockhash);
         Ok(block)
     }
 
-    fn load_blocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
-        self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ 1]))?
+    pub async fn load_blocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
+        self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ 1]))
+            .await?
             .get("tx")
             .chain_err(|| "block missing txids")?
             .as_array()
@@ -508,17 +494,16 @@ impl Daemon {
             .collect::<Result<Vec<Txid>>>()
     }
 
-    pub fn getblocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
-        self.blocktxids_cache
-            .get_or_else(&blockhash, || self.load_blocktxids(blockhash))
+    pub async fn getblocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
+        self.blocktxids_cache.get_or_fetch(&blockhash, self).await
     }
 
-    pub fn getblocks(&self, blockhashes: &[BlockHash]) -> Result<Vec<Block>> {
+    pub async fn getblocks(&self, blockhashes: &[BlockHash]) -> Result<Vec<Block>> {
         let params_list: Vec<Value> = blockhashes
             .iter()
             .map(|hash| json!([hash.to_hex(), /*verbose=*/ false]))
             .collect();
-        let values = self.requests("getblock", &params_list)?;
+        let values = self.requests("getblock", &params_list).await?;
         let mut blocks = vec![];
         for value in values {
             blocks.push(block_from_value(value)?);
@@ -526,7 +511,7 @@ impl Daemon {
         Ok(blocks)
     }
 
-    pub fn gettransaction(
+    pub async fn gettransaction(
         &self,
         txhash: &Txid,
         blockhash: Option<BlockHash>,
@@ -535,10 +520,10 @@ impl Daemon {
         if let Some(blockhash) = blockhash {
             args.as_array_mut().unwrap().push(json!(blockhash.to_hex()));
         }
-        tx_from_value(self.request("getrawtransaction", args)?)
+        tx_from_value(self.request("getrawtransaction", args).await?)
     }
 
-    pub fn gettransaction_raw(
+    pub async fn gettransaction_raw(
         &self,
         txhash: &Txid,
         blockhash: Option<&BlockHash>,
@@ -548,16 +533,16 @@ impl Daemon {
         if let Some(blockhash) = blockhash {
             args.as_array_mut().unwrap().push(json!(blockhash.to_hex()));
         }
-        Ok(self.request("getrawtransaction", args)?)
+        Ok(self.request("getrawtransaction", args).await?)
     }
 
-    pub fn gettransactions(&self, txhashes: &[&Txid]) -> Result<Vec<Transaction>> {
+    pub async fn gettransactions(&self, txhashes: &[&Txid]) -> Result<Vec<Transaction>> {
         let params_list: Vec<Value> = txhashes
             .iter()
             .map(|txhash| json!([txhash.to_hex(), /*verbose=*/ false]))
             .collect();
 
-        let values = self.requests("getrawtransaction", &params_list)?;
+        let values = self.requests("getrawtransaction", &params_list).await?;
         let mut txs = vec![];
         for value in values {
             txs.push(tx_from_value(value)?);
@@ -566,8 +551,10 @@ impl Daemon {
         Ok(txs)
     }
 
-    pub fn getmempooltxids(&self) -> Result<HashSet<Txid>> {
-        let txids: Value = self.request("getrawmempool", json!([/*verbose=*/ false]))?;
+    pub async fn getmempooltxids(&self) -> Result<HashSet<Txid>> {
+        let txids: Value = self
+            .request("getrawmempool", json!([/*verbose=*/ false]))
+            .await?;
         let mut result = HashSet::new();
         for value in txids.as_array().chain_err(|| "non-array result")? {
             result.insert(parse_hash(&value).chain_err(|| "invalid txid")?);
@@ -575,8 +562,10 @@ impl Daemon {
         Ok(result)
     }
 
-    pub fn getmempoolentry(&self, txid: &Txid) -> Result<MempoolEntry> {
-        let entry = self.request("getmempoolentry", json!([txid.to_hex()]))?;
+    pub async fn getmempoolentry(&self, txid: &Txid) -> Result<MempoolEntry> {
+        let entry = self
+            .request("getmempoolentry", json!([txid.to_hex()]))
+            .await?;
         let fee = (entry
             .get("fee")
             .chain_err(|| "missing fee")?
@@ -592,17 +581,19 @@ impl Daemon {
         Ok(MempoolEntry::new(fee, vsize))
     }
 
-    pub fn broadcast(&self, tx: &Transaction) -> Result<Txid> {
+    pub async fn broadcast(&self, tx: &Transaction) -> Result<Txid> {
         let tx = hex::encode(serialize(tx));
-        let txid = self.request("sendrawtransaction", json!([tx]))?;
+        let txid = self.request("sendrawtransaction", json!([tx])).await?;
         Ok(
             Txid::from_hex(txid.as_str().chain_err(|| "non-string txid")?)
                 .chain_err(|| "failed to parse txid")?,
         )
     }
 
-    fn get_all_headers(&self, tip: &BlockHash) -> Result<Vec<BlockHeader>> {
-        let info: Value = self.request("getblockheader", json!([tip.to_hex()]))?;
+    async fn get_all_headers(&self, tip: &BlockHash) -> Result<Vec<BlockHeader>> {
+        let info: Value = self
+            .request("getblockheader", json!([tip.to_hex()]))
+            .await?;
         let tip_height = info
             .get("height")
             .expect("missing height")
@@ -614,7 +605,7 @@ impl Daemon {
         let null_hash = BlockHash::default();
         for heights in all_heights.chunks(chunk_size) {
             trace!("downloading {} block headers", heights.len());
-            let mut headers = self.getblockheaders(&heights)?;
+            let mut headers = self.getblockheaders(&heights).await?;
             assert!(headers.len() == heights.len());
             result.append(&mut headers);
         }
@@ -629,14 +620,14 @@ impl Daemon {
     }
 
     // Returns a list of BlockHeaders in ascending height (i.e. the tip is last).
-    pub fn get_new_headers(
+    pub async fn get_new_headers(
         &self,
         indexed_headers: &HeaderList,
         bestblockhash: &BlockHash,
     ) -> Result<Vec<BlockHeader>> {
         // Iterate back over headers until known blockash is found:
         if indexed_headers.is_empty() {
-            return self.get_all_headers(bestblockhash);
+            return self.get_all_headers(bestblockhash).await;
         }
         debug!(
             "downloading new block headers ({} already indexed) from {}",
@@ -652,6 +643,7 @@ impl Daemon {
             }
             let header = self
                 .getblockheader(&blockhash)
+                .await
                 .chain_err(|| format!("failed to get {} header", blockhash))?;
             new_headers.push(header);
             blockhash = header.prev_blockhash;
@@ -660,4 +652,32 @@ impl Daemon {
         new_headers.reverse(); // so the tip is the last vector entry
         Ok(new_headers)
     }
+}
+
+pub async fn validate_daemon(daemon: &Daemon, signal: Waiter) -> Result<()> {
+    let network_info = daemon.getnetworkinfo().await?;
+    info!("{:?}", network_info);
+    if network_info.version < 16_00_00 {
+        bail!(
+            "{} is not supported - please use bitcoind 0.16+",
+            network_info.subversion,
+        )
+    }
+    let blockchain_info = daemon.getblockchaininfo().await?;
+    info!("{:?}", blockchain_info);
+    if blockchain_info.pruned {
+        bail!("pruned node is not supported (use '-prune=0' bitcoind flag)".to_owned())
+    }
+    loop {
+        let info = daemon.getblockchaininfo().await?;
+        if !info.initialblockdownload {
+            break;
+        }
+        warn!(
+            "wait until IBD is over: headers={} blocks={} progress={}",
+            info.headers, info.blocks, info.verificationprogress
+        );
+        signal.wait(Duration::from_secs(3))?;
+    }
+    Ok(())
 }

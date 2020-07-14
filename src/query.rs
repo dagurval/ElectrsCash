@@ -6,7 +6,6 @@ use bitcoin_hashes::hex::ToHex;
 use bitcoin_hashes::Hash;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
-use futures::executor::block_on;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -255,7 +254,7 @@ impl Query {
         })
     }
 
-    fn load_txns_by_prefix(
+    async fn load_txns_by_prefix(
         &self,
         store: &dyn ReadStore,
         prefixes: Vec<HashPrefix>,
@@ -264,7 +263,7 @@ impl Query {
         for txid_prefix in prefixes {
             for tx_row in txrows_by_prefix(store, txid_prefix) {
                 let txid: Txid = deserialize(&tx_row.key.txid).unwrap();
-                let txn = self.load_txn(&txid, None, Some(tx_row.height))?;
+                let txn = self.load_txn(&txid).await?;
                 txns.push(TxnHeight {
                     txn,
                     height: tx_row.height,
@@ -274,7 +273,7 @@ impl Query {
         Ok(txns)
     }
 
-    fn find_spending_input(
+    async fn find_spending_input(
         &self,
         store: &dyn ReadStore,
         funding: &FundingOutput,
@@ -299,10 +298,12 @@ impl Query {
         }
 
         // ambiguity, fetch from bitcoind to verify
-        let spending_txns: Vec<TxnHeight> = self.load_txns_by_prefix(
-            store,
-            txids_by_funding_output(store, funding.txid(), funding.output_index()),
-        )?;
+        let spending_txns: Vec<TxnHeight> = self
+            .load_txns_by_prefix(
+                store,
+                txids_by_funding_output(store, funding.txid(), funding.output_index()),
+            )
+            .await?;
         let mut spending_inputs = vec![];
         for t in &spending_txns {
             for input in t.txn.input.iter() {
@@ -368,7 +369,10 @@ impl Query {
 
         for funding_output in &funding {
             timeout.check()?;
-            if let Some(spent) = self.find_spending_input(read_store, &funding_output, timeout)? {
+            if let Some(spent) = self
+                .find_spending_input(read_store, &funding_output, timeout)
+                .await?
+            {
                 spending.push(spent);
             }
         }
@@ -393,8 +397,9 @@ impl Query {
         // // TODO: dedup outputs (somehow) both confirmed and in mempool (e.g. reorg?)
         for funding_output in funding.iter().chain(confirmed_funding.iter()) {
             timeout.check()?;
-            if let Some(spent) =
-                self.find_spending_input(tracker.index(), &funding_output, timeout)?
+            if let Some(spent) = self
+                .find_spending_input(tracker.index(), &funding_output, timeout)
+                .await?
             {
                 spending.push(spent);
             }
@@ -402,12 +407,14 @@ impl Query {
         Ok((funding, spending))
     }
 
-    pub fn status(&self, script_hash: &FullHash, timeout: &TimeoutTrigger) -> Result<Status> {
+    pub async fn status(&self, script_hash: &FullHash, timeout: &TimeoutTrigger) -> Result<Status> {
         let timer = self
             .duration
             .with_label_values(&["confirmed_status"])
             .start_timer();
-        let confirmed = block_on(self.confirmed_status(*script_hash, timeout))
+        let confirmed = self
+            .confirmed_status(*script_hash, timeout)
+            .await
             .chain_err(|| "failed to get confirmed status")?;
         timer.observe_duration();
 
@@ -415,7 +422,9 @@ impl Query {
             .duration
             .with_label_values(&["mempool_status"])
             .start_timer();
-        let mempool = block_on(self.mempool_status(*script_hash, &confirmed.0, timeout))
+        let mempool = self
+            .mempool_status(*script_hash, &confirmed.0, timeout)
+            .await
             .chain_err(|| "failed to get mempool status")?;
         timer.observe_duration();
 
@@ -463,41 +472,17 @@ impl Query {
         self.tx_cache.get(txid)
     }
 
-    fn load_txn_from_bitcoind(
-        &self,
-        txid: &Txid,
-        blockhash: Option<&BlockHash>,
-    ) -> Result<Transaction> {
-        self.tx_cache.get_or_else(&txid, || {
-            let value: Value = self
-                .app
-                .daemon()
-                .gettransaction_raw(txid, blockhash, /*verbose*/ false)?;
-            let value_hex: &str = value.as_str().chain_err(|| "non-string tx")?;
-            hex::decode(&value_hex).chain_err(|| "non-hex tx")
-        })
+    async fn load_txn_from_bitcoind(&self, txid: &Txid) -> Result<Transaction> {
+        self.tx_cache.get_or_fetch(&txid, self.app.daemon()).await
     }
 
-    pub fn load_txn(
-        &self,
-        txid: &Txid,
-        blockhash: Option<&BlockHash>,
-        blockheight: Option<u32>,
-    ) -> Result<Transaction> {
+    pub async fn load_txn(&self, txid: &Txid) -> Result<Transaction> {
         let _timer = self.duration.with_label_values(&["load_txn"]).start_timer();
         if let Some(tx) = self.load_txn_from_cache(txid) {
             return Ok(tx);
         }
 
-        let hash: Option<BlockHash> = match blockhash {
-            Some(hash) => Some(*hash),
-            None => match self.lookup_blockheader(txid, blockheight) {
-                Ok(header) => header.map(|h| *h.hash()),
-                Err(_) => None,
-            },
-        };
-
-        self.load_txn_from_bitcoind(txid, hash.as_ref())
+        self.load_txn_from_bitcoind(txid).await
     }
 
     pub fn get_headers(&self, heights: &[usize]) -> Vec<HeaderEntry> {
@@ -517,11 +502,11 @@ impl Query {
         Ok(last_header.chain_err(|| "no headers indexed")?)
     }
 
-    pub fn getblocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
-        self.app.daemon().getblocktxids(blockhash)
+    pub async fn getblocktxids(&self, blockhash: &BlockHash) -> Result<Vec<Txid>> {
+        self.app.daemon().getblocktxids(blockhash).await
     }
 
-    pub fn get_merkle_proof(
+    pub async fn get_merkle_proof(
         &self,
         tx_hash: &Txid,
         height: usize,
@@ -531,7 +516,7 @@ impl Query {
             .index()
             .get_header(height)
             .chain_err(|| format!("missing block #{}", height))?;
-        let txids = self.app.daemon().getblocktxids(&header_entry.hash())?;
+        let txids = self.getblocktxids(&header_entry.hash()).await?;
         let pos = txids
             .iter()
             .position(|txid| txid == tx_hash)
@@ -576,7 +561,7 @@ impl Query {
         Ok(create_merkle_branch_and_root(merkle_nodes, height))
     }
 
-    pub fn get_id_from_pos(
+    pub async fn get_id_from_pos(
         &self,
         height: usize,
         tx_pos: usize,
@@ -588,7 +573,7 @@ impl Query {
             .get_header(height)
             .chain_err(|| format!("missing block #{}", height))?;
 
-        let txids = self.app.daemon().getblocktxids(header_entry.hash())?;
+        let txids = self.app.daemon().getblocktxids(header_entry.hash()).await?;
         let txid = *txids
             .get(tx_pos)
             .chain_err(|| format!("No tx in position #{} in block #{}", tx_pos, height))?;
@@ -606,16 +591,20 @@ impl Query {
         Ok((txid, branch))
     }
 
-    pub fn broadcast(&self, txn: &Transaction) -> Result<Txid> {
-        self.app.daemon().broadcast(txn)
+    pub async fn broadcast(&self, txn: &Transaction) -> Result<Txid> {
+        self.app.daemon().broadcast(txn).await
     }
 
-    pub fn update_mempool(&self) -> Result<HashSet<Txid>> {
+    pub async fn update_mempool(&self) -> Result<HashSet<Txid>> {
         let _timer = self
             .duration
             .with_label_values(&["update_mempool"])
             .start_timer();
-        self.tracker.write().unwrap().update(self.app.daemon())
+        self.tracker
+            .write()
+            .unwrap()
+            .update(self.app.daemon())
+            .await
     }
 
     /// Returns [vsize, fee_rate] pairs (measured in vbytes and satoshis).
@@ -638,15 +627,17 @@ impl Query {
         (last_fee_rate as f64) * 1e-5 // [BTC/kB] = 10^5 [sat/B]
     }
 
-    pub fn get_banner(&self) -> Result<String> {
-        self.app.get_banner()
+    pub async fn get_banner(&self) -> Result<String> {
+        self.app.get_banner().await
     }
 
-    pub fn get_cashaccount_txs(&self, name: &str, height: u32) -> Result<Value> {
-        let cashaccount_txns: Vec<TxnHeight> = self.load_txns_by_prefix(
-            self.app.read_store(),
-            txids_by_cashaccount(self.app.read_store(), name, height),
-        )?;
+    pub async fn get_cashaccount_txs(&self, name: &str, height: u32) -> Result<Value> {
+        let cashaccount_txns: Vec<TxnHeight> = self
+            .load_txns_by_prefix(
+                self.app.read_store(),
+                txids_by_cashaccount(self.app.read_store(), name, height),
+            )
+            .await?;
 
         // filter on name in case of txid prefix collision
         let parser = CashAccountParser::new(None);
@@ -679,32 +670,39 @@ impl Query {
         Ok(json!(cashaccount_txns))
     }
 
+    async fn get_one_tx_for_scripthash(
+        &self,
+        store: &dyn ReadStore,
+        scripthash: FullHash,
+    ) -> Result<(u32, Txid)> {
+        // TODO: Add arg to fetch at most 1 result.
+        let rows = get_txouts(store, scripthash).await;
+
+        if !rows.is_empty() {
+            let txout = &rows[0];
+            Ok((txout.get_confirmed_height(), *txout.get_txid()))
+        } else {
+            Ok((0, Txid::default()))
+        }
+    }
+
     /// Find first outputs to scripthash
-    pub fn scripthash_first_use(&self, scripthash: FullHash) -> Result<(u32, Txid)> {
-        let get_tx = |store| {
-            // TODO: Add arg to fetch at most 1 result.
-            let rows = block_on(get_txouts(store, scripthash));
-
-            if !rows.is_empty() {
-                let txout = &rows[0];
-                Ok((txout.get_confirmed_height(), *txout.get_txid()))
-            } else {
-                Ok((0, Txid::default()))
-            }
-        };
-
+    pub async fn scripthash_first_use(&self, scripthash: FullHash) -> Result<(u32, Txid)> {
         // Look at blockchain first
-        let tx = get_tx(self.app.read_store())?;
+        let tx = self
+            .get_one_tx_for_scripthash(self.app.read_store(), scripthash)
+            .await?;
         if tx.0 != 0 {
             return Ok(tx);
         }
 
         // No match in the blockchain, try the mempool also.
         let tracker = self.tracker.read().unwrap();
-        get_tx(tracker.index())
+        self.get_one_tx_for_scripthash(tracker.index(), scripthash)
+            .await
     }
 
-    pub fn get_relayfee(&self) -> Result<f64> {
-        self.app.daemon().get_relayfee()
+    pub async fn get_relayfee(&self) -> Result<f64> {
+        self.app.daemon().get_relayfee().await
     }
 }

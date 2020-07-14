@@ -33,7 +33,7 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(
+    async fn new(
         daemon: &Daemon,
         metrics: &Metrics,
         indexed_blockhashes: HashSet<BlockHash>,
@@ -41,7 +41,7 @@ impl Parser {
     ) -> Result<Arc<Parser>> {
         Ok(Arc::new(Parser {
             magic: daemon.magic(),
-            current_headers: load_headers(daemon)?,
+            current_headers: load_headers(daemon).await?,
             indexed_blockhashes: Mutex::new(indexed_blockhashes),
             cashaccount_activation_height,
             duration: metrics.histogram_vec(
@@ -163,10 +163,10 @@ fn parse_blocks(blob: Vec<u8>, magic: u32) -> Result<Vec<Block>> {
     Ok(blocks)
 }
 
-fn load_headers(daemon: &Daemon) -> Result<HeaderList> {
-    let tip = daemon.getbestblockhash()?;
+async fn load_headers(daemon: &Daemon) -> Result<HeaderList> {
+    let tip = daemon.getbestblockhash().await?;
     let mut headers = HeaderList::empty();
-    let new_headers = headers.order(daemon.get_new_headers(&headers, &tip)?);
+    let new_headers = headers.order(daemon.get_new_headers(&headers, &tip).await?);
     headers.apply(&new_headers, tip);
     Ok(headers)
 }
@@ -229,7 +229,7 @@ fn start_indexer(
     })
 }
 
-pub fn index_blk_files(
+pub async fn index_blk_files(
     daemon: &Daemon,
     index_threads: usize,
     metrics: &Metrics,
@@ -247,7 +247,8 @@ pub fn index_blk_files(
         metrics,
         indexed_blockhashes,
         cashaccount_activation_height,
-    )?;
+    )
+    .await?;
     let (blobs, reader) = start_reader(blk_files, parser.clone());
     let rows_chan = SyncChannel::new(0);
     let indexers: Vec<JoinHandle> = (0..index_threads)

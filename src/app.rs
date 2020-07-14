@@ -42,11 +42,11 @@ impl App {
         &self.daemon
     }
 
-    pub fn update(&self, signal: &Waiter) -> Result<(Vec<HeaderEntry>, Option<HeaderEntry>)> {
+    pub async fn update(&self, signal: &Waiter) -> Result<(Vec<HeaderEntry>, Option<HeaderEntry>)> {
         let mut tip = self.tip.lock().expect("failed to lock tip");
-        let new_block = *tip != self.daemon().getbestblockhash()?;
+        let new_block = *tip != self.daemon().getbestblockhash().await?;
         if new_block {
-            let (new_headers, new_tip) = self.index().update(self.write_store(), &signal)?;
+            let (new_headers, new_tip) = self.index().update(self.write_store(), &signal).await?;
             *tip = *new_tip.hash();
             Ok((new_headers, Some(new_tip)))
         } else {
@@ -54,11 +54,11 @@ impl App {
         }
     }
 
-    pub fn get_banner(&self) -> Result<String> {
+    pub async fn get_banner(&self) -> Result<String> {
         Ok(format!(
             "{}\n{}",
             self.banner,
-            self.daemon.get_subversion()?
+            self.daemon.get_subversion().await?
         ))
     }
 }

@@ -3,6 +3,7 @@ use bitcoin::blockdata::transaction::{Transaction, TxIn};
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin_hashes::Hash;
+use futures::executor::block_on;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::RwLock;
@@ -341,16 +342,16 @@ impl Index {
             .cloned()
     }
 
-    pub fn update(
+    pub async fn update(
         &self,
         store: &impl WriteStore,
         waiter: &Waiter,
     ) -> Result<(Vec<HeaderEntry>, HeaderEntry)> {
         let daemon = self.daemon.reconnect()?;
-        let tip = daemon.getbestblockhash()?;
+        let tip = daemon.getbestblockhash().await?;
         let new_headers: Vec<HeaderEntry> = {
             let indexed_headers = self.headers.read().unwrap();
-            indexed_headers.order(daemon.get_new_headers(&indexed_headers, &tip)?)
+            indexed_headers.order(daemon.get_new_headers(&indexed_headers, &tip).await?)
         };
         if let Some(latest_header) = new_headers.last() {
             info!("{:?} ({} left to index)", latest_header, new_headers.len());
@@ -366,7 +367,7 @@ impl Index {
         let fetcher = spawn_thread("fetcher", move || {
             for chunk in blockhashes.chunks(batch_size) {
                 sender
-                    .send(daemon.getblocks(&chunk))
+                    .send(block_on(daemon.getblocks(&chunk)))
                     .expect("failed sending blocks to be indexed");
             }
             sender

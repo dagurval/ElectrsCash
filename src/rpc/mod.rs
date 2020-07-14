@@ -1,6 +1,7 @@
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::hash_types::{BlockHash, Txid};
+use bitcoin::hash_types::Txid;
 use error_chain::ChainedError;
+use futures::executor::block_on;
 use serde_json::{from_str, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -77,15 +78,20 @@ impl Connection {
         Ok(json!(self.query.get_fee_histogram()))
     }
 
-    fn cashaccount_query_name(&self, params: &[Value]) -> Result<Value> {
+    async fn cashaccount_query_name(&self, params: &[Value]) -> Result<Value> {
         let name = params.get(0).chain_err(|| "missing name")?;
         let name = name.as_str().chain_err(|| "bad accountname")?;
         let height = usize_from_value(params.get(1), "height")?;
 
-        self.query.get_cashaccount_txs(name, height as u32)
+        self.query.get_cashaccount_txs(name, height as u32).await
     }
 
-    fn handle_command(&mut self, method: &str, params: &[Value], id: &Value) -> Result<Value> {
+    async fn handle_command(
+        &mut self,
+        method: &str,
+        params: &[Value],
+        id: &Value,
+    ) -> Result<Value> {
         let timer = self
             .stats
             .latency
@@ -94,17 +100,25 @@ impl Connection {
         let timeout = TimeoutTrigger::new(Duration::from_secs(self.rpc_timeout as u64));
         let result = match method {
             "blockchain.address.get_balance" => {
-                self.blockchainrpc.address_get_balance(&params, &timeout)
+                self.blockchainrpc
+                    .address_get_balance(&params, &timeout)
+                    .await
             }
-            "blockchain.address.get_first_use" => self.blockchainrpc.address_get_first_use(&params),
+            "blockchain.address.get_first_use" => {
+                self.blockchainrpc.address_get_first_use(&params).await
+            }
             "blockchain.address.get_history" => {
-                self.blockchainrpc.address_get_history(&params, &timeout)
+                self.blockchainrpc
+                    .address_get_history(&params, &timeout)
+                    .await
             }
             "blockchain.address.get_scripthash" => {
                 self.blockchainrpc.address_get_scripthash(&params)
             }
             "blockchain.address.listunspent" => {
-                self.blockchainrpc.address_listunspent(&params, &timeout)
+                self.blockchainrpc
+                    .address_listunspent(&params, &timeout)
+                    .await
             }
             "blockchain.block.header" => self.blockchainrpc.block_header(&params),
             "blockchain.block.headers" => self.blockchainrpc.block_headers(&params),
@@ -112,40 +126,50 @@ impl Connection {
             "blockchain.headers.subscribe" => self.blockchainrpc.headers_subscribe(),
             "blockchain.relayfee" => self.blockchainrpc.relayfee(),
             "blockchain.scripthash.get_balance" => {
-                self.blockchainrpc.scripthash_get_balance(&params, &timeout)
+                self.blockchainrpc
+                    .scripthash_get_balance(&params, &timeout)
+                    .await
             }
             "blockchain.scripthash.get_first_use" => {
-                self.blockchainrpc.scripthash_get_first_use(&params)
+                self.blockchainrpc.scripthash_get_first_use(&params).await
             }
             "blockchain.scripthash.get_history" => {
-                self.blockchainrpc.scripthash_get_history(&params, &timeout)
+                self.blockchainrpc
+                    .scripthash_get_history(&params, &timeout)
+                    .await
             }
             "blockchain.scripthash.listunspent" => {
-                self.blockchainrpc.scripthash_listunspent(&params, &timeout)
+                self.blockchainrpc
+                    .scripthash_listunspent(&params, &timeout)
+                    .await
             }
             "blockchain.scripthash.subscribe" => {
-                self.blockchainrpc.scripthash_subscribe(&params, &timeout)
+                self.blockchainrpc
+                    .scripthash_subscribe(&params, &timeout)
+                    .await
             }
             "blockchain.scripthash.unsubscribe" => {
                 self.blockchainrpc.scripthash_unsubscribe(&params)
             }
-            "blockchain.transaction.broadcast" => self.blockchainrpc.transaction_broadcast(&params),
-            "blockchain.transaction.get" => self.blockchainrpc.transaction_get(&params),
+            "blockchain.transaction.broadcast" => {
+                self.blockchainrpc.transaction_broadcast(&params).await
+            }
+            "blockchain.transaction.get" => self.blockchainrpc.transaction_get(&params).await,
             "blockchain.transaction.get_merkle" => {
-                self.blockchainrpc.transaction_get_merkle(&params)
+                self.blockchainrpc.transaction_get_merkle(&params).await
             }
             "blockchain.transaction.id_from_pos" => {
-                self.blockchainrpc.transaction_id_from_pos(&params)
+                self.blockchainrpc.transaction_id_from_pos(&params).await
             }
             "mempool.get_fee_histogram" => self.mempool_get_fee_histogram(),
             "server.add_peer" => server_add_peer(),
-            "server.banner" => server_banner(&self.query),
+            "server.banner" => server_banner(&self.query).await,
             "server.donation_address" => server_donation_address(),
             "server.features" => server_features(&self.query),
             "server.peers.subscribe" => server_peers_subscribe(),
             "server.ping" => Ok(Value::Null),
             "server.version" => server_version(&params),
-            "cashaccount.query.name" => self.cashaccount_query_name(&params),
+            "cashaccount.query.name" => self.cashaccount_query_name(&params).await,
             &_ => Err(ErrorKind::RpcError(
                 RpcErrorCode::MethodNotFound,
                 format!("unknown method {}", method),
@@ -201,7 +225,7 @@ impl Connection {
         Ok(())
     }
 
-    fn handle_replies(&mut self) -> Result<()> {
+    async fn handle_replies(&mut self) -> Result<()> {
         let empty_params = json!([]);
         loop {
             let msg = self.chan.receiver().recv().chain_err(|| "channel closed")?;
@@ -218,13 +242,13 @@ impl Connection {
                             Some(&Value::String(ref method)),
                             &Value::Array(ref params),
                             Some(ref id),
-                        ) => self.handle_command(method, params, id)?,
+                        ) => self.handle_command(method, params, id).await?,
                         _ => bail!("invalid command: {}", cmd),
                     };
                     self.send_values(&[reply])?
                 }
                 Message::ScriptHashChange(hash) => {
-                    let notification = self.blockchainrpc.on_scripthash_change(hash)?;
+                    let notification = self.blockchainrpc.on_scripthash_change(hash).await?;
                     if let Some(n) = notification {
                         self.send_values(&[n])?;
                     }
@@ -268,11 +292,11 @@ impl Connection {
         }
     }
 
-    pub fn run(mut self) {
+    pub async fn run(mut self) {
         let reader = BufReader::new(self.stream.try_clone().expect("failed to clone TcpStream"));
         let tx = self.chan.sender();
         let child = spawn_thread("reader", || Connection::handle_requests(reader, tx));
-        if let Err(e) = self.handle_replies() {
+        if let Err(e) = self.handle_replies().await {
             debug!(
                 "[{}] connection handling failed: {}",
                 self.addr,
@@ -416,7 +440,7 @@ impl RPC {
                             rpc_buffer_size,
                         );
                         senders.lock().unwrap().push(conn.chan.sender());
-                        conn.run();
+                        block_on(conn.run());
                         info!("[{}] disconnected peer", addr);
                         let _ = garbage_sender.send(std::thread::current().id());
                     });
@@ -450,12 +474,13 @@ impl RPC {
         }
     }
 
-    fn get_scripthashes_effected_by_tx(
-        &self,
-        txid: &Txid,
-        blockhash: Option<&BlockHash>,
-    ) -> Result<Vec<FullHash>> {
-        let txn = self.query.load_txn(txid, blockhash, None)?;
+    async fn get_scripthashes_effected_by_tx(&self, txid: &Txid) -> Vec<FullHash> {
+        let txn = self.query.load_txn(txid).await;
+        if let Err(_e) = txn {
+            trace!("failed to get effected scripthashes for tx {}", txid);
+            return vec![];
+        }
+        let txn = txn.unwrap();
         let mut scripthashes = get_output_scripthash(&txn, None);
 
         for txin in txn.input {
@@ -465,13 +490,17 @@ impl RPC {
             let id: &Txid = &txin.previous_output.txid;
             let n = txin.previous_output.vout as usize;
 
-            let txn = self.query.load_txn(&id, None, None)?;
-            scripthashes.extend(get_output_scripthash(&txn, Some(n)));
+            let txn = self.query.load_txn(&id).await;
+            if let Err(_e) = txn {
+                trace!("failed to get effected scripthashes for tx {}", id);
+                continue;
+            }
+            scripthashes.extend(get_output_scripthash(&txn.unwrap(), Some(n)));
         }
-        Ok(scripthashes)
+        scripthashes
     }
 
-    pub fn notify_scripthash_subscriptions(
+    pub async fn notify_scripthash_subscriptions(
         &self,
         headers_changed: &[HeaderEntry],
         txs_changed: HashSet<Txid>,
@@ -479,22 +508,9 @@ impl RPC {
         let mut txn_done: HashSet<Txid> = HashSet::new();
         let mut scripthashes: HashSet<FullHash> = HashSet::new();
 
-        let mut insert_for_tx = |txid, blockhash| {
-            if !txn_done.insert(txid) {
-                return;
-            }
-            if let Ok(hashes) = self.get_scripthashes_effected_by_tx(&txid, blockhash) {
-                for h in hashes {
-                    scripthashes.insert(h);
-                }
-            } else {
-                trace!("failed to get effected scripthashes for tx {}", txid);
-            }
-        };
-
         for header in headers_changed {
             let blockhash = header.hash();
-            let txids = match self.query.getblocktxids(&blockhash) {
+            let txids = match self.query.getblocktxids(&blockhash).await {
                 Ok(txids) => txids,
                 Err(e) => {
                     warn!("Failed to get blocktxids for {}: {}", blockhash, e);
@@ -502,11 +518,21 @@ impl RPC {
                 }
             };
             for txid in txids {
-                insert_for_tx(txid, Some(blockhash));
+                if !txn_done.insert(txid) {
+                    continue;
+                }
+                for h in self.get_scripthashes_effected_by_tx(&txid).await {
+                    scripthashes.insert(h);
+                }
             }
         }
         for txid in txs_changed {
-            insert_for_tx(txid, None);
+            if !txn_done.insert(txid) {
+                continue;
+            }
+            for h in self.get_scripthashes_effected_by_tx(&txid).await {
+                scripthashes.insert(h);
+            }
         }
 
         for s in scripthashes.drain() {

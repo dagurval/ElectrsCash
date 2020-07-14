@@ -1,3 +1,4 @@
+use crate::daemon::Daemon;
 use crate::errors::*;
 use crate::metrics::{CounterVec, MetricOpts, Metrics};
 
@@ -83,15 +84,12 @@ impl BlockTxIDsCache {
         }
     }
 
-    pub fn get_or_else<F>(&self, blockhash: &BlockHash, load_txids_func: F) -> Result<Vec<Txid>>
-    where
-        F: FnOnce() -> Result<Vec<Txid>>,
-    {
+    pub async fn get_or_fetch(&self, blockhash: &BlockHash, daemon: &Daemon) -> Result<Vec<Txid>> {
         if let Some(txids) = self.map.lock().unwrap().get(blockhash) {
             return Ok(txids.clone());
         }
 
-        let txids = load_txids_func()?;
+        let txids = daemon.load_blocktxids(blockhash).await?;
         let byte_size = 32 /* hash size */ * (1 /* key */ + txids.len() /* values */);
         self.map
             .lock()
@@ -124,14 +122,13 @@ impl TransactionCache {
         }
     }
 
-    pub fn get_or_else<F>(&self, txid: &Txid, load_txn_func: F) -> Result<Transaction>
-    where
-        F: FnOnce() -> Result<Vec<u8>>,
-    {
+    pub async fn get_or_fetch(&self, txid: &Txid, daemon: &Daemon) -> Result<Transaction> {
         if let Some(txn) = self.get(txid) {
             return Ok(txn);
         }
-        let serialized_txn = load_txn_func()?;
+        let tx_hex = daemon.gettransaction_raw(txid, None, false).await?;
+        let tx_hex = tx_hex.as_str().chain_err(|| "non-string tx")?;
+        let serialized_txn = hex::decode(tx_hex).chain_err(|| "non-hex tx")?;
         let txn = deserialize(&serialized_txn).chain_err(|| "failed to parse serialized tx")?;
         let byte_size = 32 /* key (hash size) */ + serialized_txn.len();
         self.map

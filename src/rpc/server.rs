@@ -45,7 +45,7 @@ fn versionstr() -> String {
     format!("ElectrsCash {}", ELECTRSCASH_VERSION)
 }
 
-pub fn parse_version(version: &str) -> Result<Version> {
+fn parse_version(version: &str) -> Result<Version> {
     let version = Version::from(&version).chain_err(|| rpc_arg_error("invalid version string"))?;
     Ok(version)
 }
@@ -71,8 +71,8 @@ pub fn server_version(params: &[Value]) -> Result<Value> {
     Err(rpc_arg_error("invalid value in version argument").into())
 }
 
-pub fn server_banner(query: &Arc<Query>) -> Result<Value> {
-    Ok(json!(query.get_banner()?))
+pub async fn server_banner(query: &Arc<Query>) -> Result<Value> {
+    Ok(json!(query.get_banner().await?))
 }
 
 pub fn server_donation_address() -> Result<Value> {

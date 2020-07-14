@@ -44,20 +44,29 @@ impl BlockchainRPC {
             rpc_timeout,
         }
     }
-    pub fn address_get_balance(&self, params: &[Value], timeout: &TimeoutTrigger) -> Result<Value> {
+    pub async fn address_get_balance(
+        &self,
+        params: &[Value],
+        timeout: &TimeoutTrigger,
+    ) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
         let scripthash = addr_to_scripthash(&addr)?;
-        get_balance(&*self.query, &scripthash, timeout)
+        get_balance(&*self.query, &scripthash, timeout).await
     }
-    pub fn address_get_first_use(&self, params: &[Value]) -> Result<Value> {
+
+    pub async fn address_get_first_use(&self, params: &[Value]) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
         let scripthash = addr_to_scripthash(&addr)?;
-        get_first_use(&*self.query, scripthash)
+        get_first_use(&*self.query, scripthash).await
     }
-    pub fn address_get_history(&self, params: &[Value], timeout: &TimeoutTrigger) -> Result<Value> {
+    pub async fn address_get_history(
+        &self,
+        params: &[Value],
+        timeout: &TimeoutTrigger,
+    ) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
         let scripthash = addr_to_scripthash(&addr)?;
-        get_history(&self.query, &scripthash, timeout)
+        get_history(&self.query, &scripthash, timeout).await
     }
 
     pub fn address_get_scripthash(&self, params: &[Value]) -> Result<Value> {
@@ -65,10 +74,14 @@ impl BlockchainRPC {
         Ok(json!(scripthash.to_le_hex()))
     }
 
-    pub fn address_listunspent(&self, params: &[Value], timeout: &TimeoutTrigger) -> Result<Value> {
+    pub async fn address_listunspent(
+        &self,
+        params: &[Value],
+        timeout: &TimeoutTrigger,
+    ) -> Result<Value> {
         let addr = str_from_value(params.get(0), "address")?;
         let scripthash = addr_to_scripthash(&addr)?;
-        listunspent(&*self.query, &scripthash, timeout)
+        listunspent(&*self.query, &scripthash, timeout).await
     }
 
     pub fn block_header(&self, params: &[Value]) -> Result<Value> {
@@ -149,45 +162,45 @@ impl BlockchainRPC {
         Ok(json!(self.relayfee)) // in BTC/kB
     }
 
-    pub fn scripthash_get_balance(
+    pub async fn scripthash_get_balance(
         &self,
         params: &[Value],
         timeout: &TimeoutTrigger,
     ) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        get_balance(&*self.query, &scripthash, timeout)
+        get_balance(&*self.query, &scripthash, timeout).await
     }
 
-    pub fn scripthash_get_first_use(&self, params: &[Value]) -> Result<Value> {
+    pub async fn scripthash_get_first_use(&self, params: &[Value]) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        get_first_use(&*self.query, scripthash)
+        get_first_use(&*self.query, scripthash).await
     }
 
-    pub fn scripthash_get_history(
+    pub async fn scripthash_get_history(
         &self,
         params: &[Value],
         timeout: &TimeoutTrigger,
     ) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        get_history(&self.query, &scripthash, timeout)
+        get_history(&self.query, &scripthash, timeout).await
     }
 
-    pub fn scripthash_listunspent(
+    pub async fn scripthash_listunspent(
         &self,
         params: &[Value],
         timeout: &TimeoutTrigger,
     ) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        listunspent(&*self.query, &scripthash, timeout)
+        listunspent(&*self.query, &scripthash, timeout).await
     }
 
-    pub fn scripthash_subscribe(
+    pub async fn scripthash_subscribe(
         &mut self,
         params: &[Value],
         timeout: &TimeoutTrigger,
     ) -> Result<Value> {
         let script_hash = scripthash_from_value(params.get(0))?;
-        let status = self.query.status(&script_hash, timeout)?;
+        let status = self.query.status(&script_hash, timeout).await?;
         let result = status.hash().map_or(Value::Null, |h| json!(hex::encode(h)));
         self.status_hashes.insert(script_hash, result.clone());
         self.stats
@@ -202,7 +215,7 @@ impl BlockchainRPC {
         Ok(json!(removed))
     }
 
-    pub fn transaction_broadcast(&self, params: &[Value]) -> Result<Value> {
+    pub async fn transaction_broadcast(&self, params: &[Value]) -> Result<Value> {
         let tx = params.get(0).chain_err(|| rpc_arg_error("missing tx"))?;
         let tx = tx.as_str().chain_err(|| rpc_arg_error("non-string tx"))?;
         let tx = hex::decode(&tx).chain_err(|| rpc_arg_error("non-hex tx"))?;
@@ -210,18 +223,19 @@ impl BlockchainRPC {
         let txid = self
             .query
             .broadcast(&tx)
+            .await
             .chain_err(|| rpc_arg_error("rejected by network"))?;
         Ok(json!(txid.to_hex()))
     }
 
-    pub fn transaction_get(&self, params: &[Value]) -> Result<Value> {
+    pub async fn transaction_get(&self, params: &[Value]) -> Result<Value> {
         let tx_hash = hash_from_value::<Txid>(params.get(0))?;
         let verbose = match params.get(1) {
             Some(value) => value.as_bool().chain_err(|| "non-bool verbose value")?,
             None => false,
         };
         if !verbose {
-            let tx = self.query.load_txn(&tx_hash, None, None)?;
+            let tx = self.query.load_txn(&tx_hash).await?;
             Ok(json!(hex::encode(serialize(&tx))))
         } else {
             let header = self.query.lookup_blockheader(&tx_hash, None)?;
@@ -244,7 +258,7 @@ impl BlockchainRPC {
                 None => 0,
             };
             let blockhash = header.map(|h| *h.hash());
-            let tx = self.query.load_txn(&tx_hash, blockhash.as_ref(), None)?;
+            let tx = self.query.load_txn(&tx_hash).await?;
 
             let tx_serialized = serialize(&tx);
             Ok(json!({
@@ -272,12 +286,13 @@ impl BlockchainRPC {
         }
     }
 
-    pub fn transaction_get_merkle(&self, params: &[Value]) -> Result<Value> {
+    pub async fn transaction_get_merkle(&self, params: &[Value]) -> Result<Value> {
         let tx_hash = hash_from_value::<Txid>(params.get(0))?;
         let height = usize_from_value(params.get(1), "height")?;
         let (merkle, pos) = self
             .query
             .get_merkle_proof(&tx_hash, height)
+            .await
             .chain_err(|| "cannot create merkle proof")?;
         let merkle: Vec<String> = merkle.into_iter().map(|txid| txid.to_hex()).collect();
         Ok(json!({
@@ -286,12 +301,15 @@ impl BlockchainRPC {
                 "pos": pos}))
     }
 
-    pub fn transaction_id_from_pos(&self, params: &[Value]) -> Result<Value> {
+    pub async fn transaction_id_from_pos(&self, params: &[Value]) -> Result<Value> {
         let height = usize_from_value(params.get(0), "height")?;
         let tx_pos = usize_from_value(params.get(1), "tx_pos")?;
         let want_merkle = bool_from_value_or(params.get(2), "merkle", false)?;
 
-        let (txid, merkle) = self.query.get_id_from_pos(height, tx_pos, want_merkle)?;
+        let (txid, merkle) = self
+            .query
+            .get_id_from_pos(height, tx_pos, want_merkle)
+            .await?;
 
         if !want_merkle {
             return Ok(json!(txid.to_hex()));
@@ -328,7 +346,7 @@ impl BlockchainRPC {
         Ok(None)
     }
 
-    pub fn on_scripthash_change(&mut self, scripthash: FullHash) -> Result<Option<Value>> {
+    pub async fn on_scripthash_change(&mut self, scripthash: FullHash) -> Result<Option<Value>> {
         let old_statushash;
         match self.status_hashes.get(&scripthash) {
             Some(statushash) => {
@@ -346,7 +364,7 @@ impl BlockchainRPC {
             .start_timer();
 
         let timeout = TimeoutTrigger::new(Duration::from_secs(self.rpc_timeout as u64));
-        let status = self.query.status(&scripthash, &timeout)?;
+        let status = self.query.status(&scripthash, &timeout).await?;
         let new_statushash = status.hash().map_or(Value::Null, |h| json!(hex::encode(h)));
         if new_statushash == *old_statushash {
             return Ok(None);

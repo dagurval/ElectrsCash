@@ -5,6 +5,7 @@ extern crate error_chain;
 extern crate log;
 
 use error_chain::ChainedError;
+use futures::executor::block_on;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use electrscash::{
     bulk,
     cache::{BlockTxIDsCache, TransactionCache},
     config::Config,
+    daemon::validate_daemon,
     daemon::Daemon,
     errors::*,
     index::Index,
@@ -24,7 +26,7 @@ use electrscash::{
     store::{full_compaction, is_compatible_version, is_fully_compacted, DBStore},
 };
 
-fn run_server(config: &Config) -> Result<()> {
+async fn run_server(config: &Config) -> Result<()> {
     let signal = Waiter::start();
     let metrics = Arc::new(Metrics::new(config.monitoring_addr));
     metrics.start();
@@ -42,6 +44,9 @@ fn run_server(config: &Config) -> Result<()> {
         blocktxids_cache,
         &*metrics,
     )?;
+
+    validate_daemon(&daemon, signal.clone()).await?;
+
     // Perform initial indexing.
     let compatible = {
         let store = DBStore::open(&config.db_path, config.low_memory);
@@ -65,7 +70,7 @@ fn run_server(config: &Config) -> Result<()> {
     } else if config.jsonrpc_import {
         // slower: uses JSONRPC for fetching blocks
         index.reload(&store); // load headers
-        index.update(&store, &signal)?;
+        index.update(&store, &signal).await?;
         full_compaction(store)
     } else {
         // faster, but uses more memory
@@ -76,7 +81,8 @@ fn run_server(config: &Config) -> Result<()> {
             &signal,
             store,
             config.cashaccount_activation_height,
-        )?;
+        )
+        .await?;
         let store = full_compaction(store);
         index.reload(&store); // make sure the block header index is up-to-date
         store
@@ -86,18 +92,19 @@ fn run_server(config: &Config) -> Result<()> {
     let app = App::new(store, index, daemon, &config)?;
     let tx_cache = TransactionCache::new(config.tx_cache_size, &*metrics);
     let query = Query::new(app.clone(), &*metrics, tx_cache);
-    let relayfee = query.get_relayfee()?;
+    let relayfee = query.get_relayfee().await?;
     debug!("relayfee: {}", relayfee);
 
     let mut server: Option<RPC> = None; // Electrum RPC server
 
     loop {
-        let (headers_changed, new_tip) = app.update(&signal)?;
-        let txs_changed = query.update_mempool()?;
+        let (headers_changed, new_tip) = app.update(&signal).await?;
+        let txs_changed = query.update_mempool().await?;
 
         server = match server {
             Some(rpc) => {
-                rpc.notify_scripthash_subscriptions(&headers_changed, txs_changed);
+                rpc.notify_scripthash_subscriptions(&headers_changed, txs_changed)
+                    .await;
                 if let Some(header) = new_tip {
                     rpc.notify_subscriptions_chaintip(header);
                 }
@@ -122,7 +129,7 @@ fn run_server(config: &Config) -> Result<()> {
 
 fn main() {
     let config = Config::from_args();
-    if let Err(e) = run_server(&config) {
+    if let Err(e) = block_on(run_server(&config)) {
         error!("server failed: {}", e.display_chain());
         process::exit(1);
     }
