@@ -19,7 +19,6 @@ use crate::metrics::{CounterVec, Histogram, HistogramOpts, HistogramVec, MetricO
 use crate::signal::Waiter;
 use crate::store::{DBStore, Row, WriteStore};
 use crate::util::{spawn_thread, HeaderList, SyncChannel};
-use bitcoin::BitcoinHash;
 
 struct Parser {
     magic: u32,
@@ -96,7 +95,7 @@ impl Parser {
         let timer = self.duration.with_label_values(&["index"]).start_timer();
         let cashaccount = CashAccountParser::new(Some(self.cashaccount_activation_height));
         for block in blocks {
-            let blockhash = block.bitcoin_hash();
+            let blockhash = block.block_hash();
             if let Some(header) = self.current_headers.header_by_blockhash(&blockhash) {
                 if self
                     .indexed_blockhashes

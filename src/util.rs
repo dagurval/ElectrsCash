@@ -1,6 +1,5 @@
 use bitcoin::blockdata::block::BlockHeader;
 use bitcoin::hash_types::BlockHash;
-use bitcoin::util::hash::BitcoinHash;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
@@ -66,7 +65,7 @@ fn hash_headers(headers: Vec<BlockHeader>) -> Vec<HashedHeader> {
     // header[i] -> header[i-1] (i.e. header.last() is the tip)
     let hashed_headers =
         Vec::<HashedHeader>::from_iter(headers.into_iter().map(|header| HashedHeader {
-            blockhash: header.bitcoin_hash(),
+            blockhash: header.block_hash(),
             header,
         }));
     for i in 1..hashed_headers.len() {
@@ -290,7 +289,6 @@ mod tests {
     fn test_headers() {
         use bitcoin::blockdata::block::BlockHeader;
         use bitcoin::hash_types::{BlockHash, TxMerkleNode};
-        use bitcoin::util::hash::BitcoinHash;
         use bitcoin_hashes::Hash;
 
         use super::HeaderList;
@@ -313,7 +311,7 @@ mod tests {
             nonce: 0,
         }];
         for _height in 1..10 {
-            let prev_blockhash = headers.last().unwrap().bitcoin_hash();
+            let prev_blockhash = headers.last().unwrap().block_hash();
             let header = BlockHeader {
                 version: 1,
                 prev_blockhash,
@@ -334,7 +332,7 @@ mod tests {
         for h in 0..3 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }
@@ -348,7 +346,7 @@ mod tests {
         for h in 0..6 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }
@@ -362,7 +360,7 @@ mod tests {
         for h in 0..10 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }
@@ -370,7 +368,7 @@ mod tests {
         // Reorg the chain and test apply() on it
         for h in 8..10 {
             headers[h].nonce += 1;
-            headers[h].prev_blockhash = headers[h - 1].bitcoin_hash()
+            headers[h].prev_blockhash = headers[h - 1].block_hash()
         }
         // Test reorging the chain
         let ordered = header_list.order(headers[8..10].to_vec());
@@ -381,19 +379,19 @@ mod tests {
         for h in 0..10 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }
 
         // Test "trimming" the chain
-        header_list.apply(&vec![], headers[7].bitcoin_hash());
+        header_list.apply(&vec![], headers[7].block_hash());
         assert_eq!(header_list.len(), 8);
-        assert_eq!(header_list.tiphash(), headers[7].bitcoin_hash());
+        assert_eq!(header_list.tiphash(), headers[7].block_hash());
         for h in 0..8 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }
@@ -407,7 +405,7 @@ mod tests {
         for h in 0..10 {
             let entry = header_list.header_by_height(h).unwrap();
             assert_eq!(entry.header, headers[h]);
-            assert_eq!(entry.hash, headers[h].bitcoin_hash());
+            assert_eq!(entry.hash, headers[h].block_hash());
             assert_eq!(entry.height, h);
             assert_eq!(header_list.header_by_blockhash(&entry.hash), Some(entry));
         }

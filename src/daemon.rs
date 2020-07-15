@@ -22,7 +22,6 @@ use crate::errors::*;
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::signal::Waiter;
 use crate::util::HeaderList;
-use bitcoin::BitcoinHash;
 
 fn parse_hash<T: Hash>(value: &Value) -> Result<T> {
     Ok(T::from_hex(
@@ -492,7 +491,7 @@ impl Daemon {
             self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ false]))
                 .await?,
         )?;
-        assert_eq!(block.bitcoin_hash(), *blockhash);
+        assert_eq!(block.block_hash(), *blockhash);
         Ok(block)
     }
 
@@ -611,7 +610,7 @@ impl Daemon {
         let mut blockhash = null_hash;
         for header in &result {
             assert_eq!(header.prev_blockhash, blockhash);
-            blockhash = header.bitcoin_hash();
+            blockhash = header.block_hash();
         }
         assert_eq!(blockhash, *tip);
         Ok(result)

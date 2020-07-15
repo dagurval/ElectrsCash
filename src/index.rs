@@ -19,7 +19,6 @@ use crate::scripthash::{full_hash, FullHash};
 use crate::signal::Waiter;
 use crate::store::{ReadStore, Row, WriteStore};
 use crate::util::{spawn_thread, HeaderEntry, HeaderList, HeaderMap, SyncChannel};
-use bitcoin::BitcoinHash;
 
 #[derive(Serialize, Deserialize)]
 struct BlockKey {
@@ -61,7 +60,7 @@ pub fn index_block<'a>(
     height: u32,
     cashaccount: &'a CashAccountParser,
 ) -> impl 'a + Iterator<Item = Row> {
-    let blockhash = block.bitcoin_hash();
+    let blockhash = block.block_hash();
     // Persist block hash and header
     let row = Row {
         key: bincode::serialize(&BlockKey {
@@ -129,7 +128,7 @@ fn read_indexed_headers(store: &dyn ReadStore) -> HeaderList {
     assert_eq!(
         headers
             .last()
-            .map(BlockHeader::bitcoin_hash)
+            .map(BlockHeader::block_hash)
             .unwrap_or(null_hash),
         latest_blockhash
     );
@@ -291,7 +290,7 @@ impl Index {
             }
 
             let rows_iter = batch.iter().flat_map(|block| {
-                let blockhash = block.bitcoin_hash();
+                let blockhash = block.block_hash();
                 let height = *height_map
                     .get(&blockhash)
                     .unwrap_or_else(|| panic!("missing header for block {}", blockhash));

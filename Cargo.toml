@@ -21,7 +21,7 @@ latest_rust = []  # use latest Rust features (otherwise, support Rust 1.34)
 [dependencies]
 base64 = "0.10"
 bincode = "1.0"
-bitcoin = { version = "0.23", features = ["use-serde"] }
+bitcoin = { version = "0.23", features = ["use-serde", "bump-decode-max-size"], git = "https://github.com/dagurval/rust-bitcoin.git", branch = "max-decode-size" }
 bitcoin_hashes = "0.7.6"
 configure_me = "0.3.3"
 crossbeam-channel = "0.3"
