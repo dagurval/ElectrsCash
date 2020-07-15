@@ -1,11 +1,9 @@
+use crate::db::cashaccounts::TxCashAccountRow;
 use crate::mempool::MEMPOOL_HEIGHT;
 use crate::scripthash::FullHash;
-use crate::store::ReadStore;
 use crate::store::Row;
-use crate::util::{hash_prefix, Bytes, HashPrefix};
 use bitcoin::blockdata::script::Script;
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::hash_types::Txid;
 use c_fixed_string::CFixedStr;
 use cashaccount_sys::{
     cashacc_account_destroy, cashacc_account_init, cashacc_parse_opreturn, CashAccount,
@@ -15,70 +13,13 @@ use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use std::ffi::CStr;
 
-fn compute_accountname_hash(accountname: &[u8], blockheight: u32) -> FullHash {
+pub fn compute_accountname_hash(accountname: &[u8], blockheight: u32) -> FullHash {
     let mut hash = FullHash::default();
     let mut sha2 = Sha256::new();
     sha2.input(accountname);
     sha2.input(&blockheight.to_be_bytes());
     sha2.result(&mut hash);
     hash
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TxCashAccountKey {
-    code: u8,
-    accout_hash_prefix: HashPrefix,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TxCashAccountRow {
-    key: TxCashAccountKey,
-    pub txid_prefix: HashPrefix,
-}
-
-impl TxCashAccountRow {
-    pub fn new(txid: &Txid, accountname: &[u8], blockheight: u32) -> TxCashAccountRow {
-        TxCashAccountRow {
-            key: TxCashAccountKey {
-                code: b'C',
-                accout_hash_prefix: hash_prefix(&compute_accountname_hash(
-                    accountname,
-                    blockheight,
-                )),
-            },
-            txid_prefix: hash_prefix(&txid[..]),
-        }
-    }
-
-    pub fn filter(accountname: &[u8], blockheight: u32) -> Bytes {
-        bincode::serialize(&TxCashAccountKey {
-            code: b'C',
-            accout_hash_prefix: hash_prefix(&compute_accountname_hash(accountname, blockheight)),
-        })
-        .unwrap()
-    }
-
-    pub fn to_row(&self) -> Row {
-        Row {
-            key: bincode::serialize(&self).unwrap(),
-            value: vec![],
-        }
-    }
-
-    pub fn from_row(row: &Row) -> TxCashAccountRow {
-        bincode::deserialize(&row.key).expect("failed to parse TxCashAccountRow")
-    }
-}
-
-pub fn txids_by_cashaccount(store: &dyn ReadStore, name: &str, height: u32) -> Vec<HashPrefix> {
-    store
-        .scan(&TxCashAccountRow::filter(
-            name.to_ascii_lowercase().as_bytes(),
-            height,
-        ))
-        .iter()
-        .map(|row| TxCashAccountRow::from_row(row).txid_prefix)
-        .collect()
 }
 
 fn parse_cashaccount(account: *mut CashAccount, txn: &Transaction) -> bool {
@@ -152,7 +93,7 @@ impl CashAccountParser {
         let name = unsafe { CStr::from_ptr((*self.account).name).to_str().unwrap() };
         Some(
             TxCashAccountRow::new(
-                &txn.txid(),
+                txn.txid(),
                 name.to_ascii_lowercase().as_bytes(),
                 blockheight,
             )

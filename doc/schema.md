@@ -36,4 +36,4 @@ Allows finding all transactions containing CashAccount registration by name and 
 
 |  Code  | Account name              | Registration TxID Prefix   |   |
 | ------ | ------------------------- | -------------------------- | - |
-| `b'C'` | `SHA256(name#height)[:8]` | `txid[:8]`                 |   |
+| `b'C'` | `SHA256(name#height)[:8]` | `txid` (32 bytes)          |   |

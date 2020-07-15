@@ -1,5 +1,5 @@
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::consensus::encode::serialize;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin_hashes::hex::ToHex;
@@ -12,7 +12,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::app::App;
 use crate::cache::TransactionCache;
-use crate::cashaccount::{txids_by_cashaccount, CashAccountParser};
+use crate::cashaccount::CashAccountParser;
+use crate::db::cashaccounts::txids_by_cashaccount;
 use crate::db::inputs::get_txin;
 use crate::db::inputs::TxInRow;
 use crate::db::outputs::{get_txouts, TxOutRow};
@@ -23,7 +24,7 @@ use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::scripthash::FullHash;
 use crate::store::{ReadStore, Row};
 use crate::timeout::TimeoutTrigger;
-use crate::util::{HashPrefix, HeaderEntry};
+use crate::util::HeaderEntry;
 
 pub enum ConfirmationState {
     Confirmed,
@@ -189,11 +190,6 @@ impl Status {
     }
 }
 
-struct TxnHeight {
-    txn: Transaction,
-    height: u32,
-}
-
 fn merklize<T: Hash>(left: T, right: T) -> T {
     let data = [&left[..], &right[..]].concat();
     <T as Hash>::hash(&data)
@@ -224,14 +220,6 @@ fn txrow_by_txid(store: &dyn ReadStore, txid: &Txid) -> Option<TxRow> {
     Some(TxRow::from_row(&Row { key, value }))
 }
 
-fn txrows_by_prefix(store: &dyn ReadStore, txid_prefix: HashPrefix) -> Vec<TxRow> {
-    store
-        .scan(&TxRow::filter_prefix(txid_prefix))
-        .iter()
-        .map(|row| TxRow::from_row(row))
-        .collect()
-}
-
 pub struct Query {
     app: Arc<App>,
     tracker: RwLock<Tracker>,
@@ -255,21 +243,11 @@ impl Query {
         })
     }
 
-    async fn load_txns_by_prefix(
-        &self,
-        store: &dyn ReadStore,
-        prefixes: Vec<HashPrefix>,
-    ) -> Result<Vec<TxnHeight>> {
+    async fn load_txns(&self, txids: Vec<Txid>) -> Result<Vec<Transaction>> {
         let mut txns = vec![];
-        for txid_prefix in prefixes {
-            for tx_row in txrows_by_prefix(store, txid_prefix) {
-                let txid: Txid = deserialize(&tx_row.key.txid).unwrap();
-                let txn = self.load_txn(&txid).await?;
-                txns.push(TxnHeight {
-                    txn,
-                    height: tx_row.height,
-                })
-            }
+        for txid in txids {
+            let txn = self.load_txn(&txid).await?;
+            txns.push(txn)
         }
         Ok(txns)
     }
@@ -592,18 +570,7 @@ impl Query {
     }
 
     pub async fn get_cashaccount_txs(&self, name: &str, height: u32) -> Result<Value> {
-        let cashaccount_txns: Vec<TxnHeight> = self
-            .load_txns_by_prefix(
-                self.app.read_store(),
-                txids_by_cashaccount(self.app.read_store(), name, height),
-            )
-            .await?;
-
-        // filter on name in case of txid prefix collision
-        let parser = CashAccountParser::new(None);
-        let cashaccount_txns = cashaccount_txns
-            .iter()
-            .filter(|txn| parser.has_cashaccount(&txn.txn, name));
+        let txids: Vec<Txid> = txids_by_cashaccount(self.app.read_store(), name, height).await;
 
         #[derive(Serialize, Deserialize, Debug)]
         struct AccountTx {
@@ -619,10 +586,18 @@ impl Query {
             .chain_err(|| format!("missing header at height {}", height))?;
         let blockhash = *header.hash();
 
+        let cashaccount_txns = self.load_txns(txids).await?;
+
+        // filter on name in case of txid prefix collision
+        let parser = CashAccountParser::new(None);
+        let cashaccount_txns = cashaccount_txns
+            .iter()
+            .filter(|txn| parser.has_cashaccount(&txn, name));
+
         let cashaccount_txns: Vec<AccountTx> = cashaccount_txns
             .map(|txn| AccountTx {
-                tx: hex::encode(&serialize(&txn.txn)),
-                height: txn.height,
+                tx: hex::encode(&serialize(txn)),
+                height,
                 blockhash: blockhash.to_hex(),
             })
             .collect();
