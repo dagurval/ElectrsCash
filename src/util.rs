@@ -280,6 +280,10 @@ where
         .unwrap()
 }
 
+pub fn to_async_pathbuf(path: &std::path::PathBuf) -> async_std::path::PathBuf {
+    async_std::path::PathBuf::from(path)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

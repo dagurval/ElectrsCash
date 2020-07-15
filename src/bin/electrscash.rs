@@ -9,6 +9,7 @@ use futures::executor::block_on;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
+use async_std::sync::Mutex;
 
 use electrscash::{
     app::App,
@@ -17,6 +18,7 @@ use electrscash::{
     config::Config,
     daemon::validate_daemon,
     daemon::Daemon,
+    daemon::Connection,
     errors::*,
     index::Index,
     metrics::Metrics,
@@ -24,6 +26,7 @@ use electrscash::{
     rpc::RPC,
     signal::Waiter,
     store::{full_compaction, is_compatible_version, is_fully_compacted, DBStore},
+    util::to_async_pathbuf,
 };
 
 async fn run_server(config: &Config) -> Result<()> {
@@ -35,10 +38,15 @@ async fn run_server(config: &Config) -> Result<()> {
         &*metrics,
     ));
 
+    let bitcoind_connection = Mutex::new(Connection::new(
+                config.daemon_rpc_addr,
+                config.cookie_getter(),
+                signal.clone(),
+            ).await?);
+
     let daemon = Daemon::new(
-        &config.daemon_dir,
-        config.daemon_rpc_addr,
-        config.cookie_getter(),
+        &to_async_pathbuf(&config.daemon_dir),
+        bitcoind_connection,
         config.network_type,
         signal.clone(),
         blocktxids_cache,
@@ -64,7 +72,7 @@ async fn run_server(config: &Config) -> Result<()> {
         &*metrics,
         config.index_batch_size,
         config.cashaccount_activation_height,
-    )?;
+    ).await?;
     let store = if is_fully_compacted(&store) {
         store // initial import and full compaction are over
     } else if config.jsonrpc_import {
@@ -89,7 +97,7 @@ async fn run_server(config: &Config) -> Result<()> {
     }
     .enable_compaction(); // enable auto compactions before starting incremental index updates.
 
-    let app = App::new(store, index, daemon, &config)?;
+    let app = App::new(store, index, daemon, &config).await?;
     let tx_cache = TransactionCache::new(config.tx_cache_size, &*metrics);
     let query = Query::new(app.clone(), &*metrics, tx_cache);
     let relayfee = query.get_relayfee().await?;

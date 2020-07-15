@@ -6,12 +6,15 @@ use bitcoin::network::constants::Network;
 use bitcoin_hashes::hex::{FromHex, ToHex};
 use bitcoin_hashes::Hash;
 use serde_json::{from_str, from_value, Map, Value};
+use async_std::io::{BufReader, BufWriter};
+use async_std::io::prelude::*;
+use async_std::net::{SocketAddr, TcpStream};
+use async_std::path::PathBuf;
+use async_std::prelude::*;
+use async_std::sync::{Arc, Mutex};
+use async_std::fs::read_dir;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Lines, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::cache::BlockTxIDsCache;
@@ -147,17 +150,16 @@ pub trait CookieGetter: Send + Sync {
     fn get(&self) -> Result<Vec<u8>>;
 }
 
-struct Connection {
-    tx: TcpStream,
-    rx: Lines<BufReader<TcpStream>>,
+pub struct Connection {
+    conn: Arc<Mutex<TcpStream>>,
     cookie_getter: Arc<dyn CookieGetter>,
     addr: SocketAddr,
     signal: Waiter,
 }
 
-fn tcp_connect(addr: SocketAddr, signal: &Waiter) -> Result<TcpStream> {
+async fn tcp_connect(addr: SocketAddr, signal: &Waiter) -> Result<TcpStream> {
     loop {
-        match TcpStream::connect(addr) {
+        match TcpStream::connect(addr).await {
             Ok(conn) => return Ok(conn),
             Err(err) => {
                 warn!("failed to connect daemon at {}: {}", addr, err);
@@ -169,30 +171,25 @@ fn tcp_connect(addr: SocketAddr, signal: &Waiter) -> Result<TcpStream> {
 }
 
 impl Connection {
-    fn new(
+    pub async fn new(
         addr: SocketAddr,
         cookie_getter: Arc<dyn CookieGetter>,
         signal: Waiter,
     ) -> Result<Connection> {
-        let conn = tcp_connect(addr, &signal)?;
-        let reader = BufReader::new(
-            conn.try_clone()
-                .chain_err(|| format!("failed to clone {:?}", conn))?,
-        );
+        let conn = Arc::new(Mutex::new(tcp_connect(addr, &signal).await?));
         Ok(Connection {
-            tx: conn,
-            rx: reader.lines(),
+            conn,
             cookie_getter,
             addr,
             signal,
         })
     }
 
-    fn reconnect(&self) -> Result<Connection> {
-        Connection::new(self.addr, self.cookie_getter.clone(), self.signal.clone())
+    async fn reconnect(&self) -> Result<Connection> {
+        Connection::new(self.addr, self.cookie_getter.clone(), self.signal.clone()).await
     }
 
-    fn send(&mut self, request: &str) -> Result<()> {
+    async fn send(&mut self, request: &str) -> Result<()> {
         let cookie = &self.cookie_getter.get()?;
         let msg = format!(
             "POST / HTTP/1.1\nAuthorization: Basic {}\nContent-Length: {}\n\n{}",
@@ -200,24 +197,37 @@ impl Connection {
             request.len(),
             request,
         );
-        self.tx.write_all(msg.as_bytes()).chain_err(|| {
-            ErrorKind::Connection("disconnected from daemon while sending".to_owned())
+        let c = self.conn.lock().await;
+        let mut writer = BufWriter::new(&*c);
+        writer.write(msg.as_bytes()).await.chain_err(|| {
+            ErrorKind::Connection("failed to write to stream buffer".to_owned())
+        })?;
+        writer.flush().await.chain_err(|| {
+            ErrorKind::Connection("failed to flush tcp stream buffer".to_owned())
         })
     }
 
-    fn recv(&mut self) -> Result<String> {
+    async fn recv(&mut self) -> Result<String> {
         // TODO: use proper HTTP parser.
         let mut in_header = true;
         let mut contents: Option<String> = None;
-        let iter = self.rx.by_ref();
-        let status = iter
+        let c = self.conn.lock().await;
+        let reader = BufReader::new(&*c);
+        let mut lines = reader.lines();
+        let status = lines
             .next()
+            .await
             .chain_err(|| {
                 ErrorKind::Connection("disconnected from daemon while receiving".to_owned())
             })?
             .chain_err(|| "failed to read status")?;
         let mut headers = HashMap::new();
-        for line in iter {
+        loop {
+            let line = lines.next().await;
+            if line.is_none() {
+                break;
+            }
+            let line = line.unwrap();
             let line = line.chain_err(|| ErrorKind::Connection("failed to read".to_owned()))?;
             if line.is_empty() {
                 in_header = false; // next line should contain the actual response.
@@ -299,8 +309,7 @@ pub struct Daemon {
 impl Daemon {
     pub fn new(
         daemon_dir: &PathBuf,
-        daemon_rpc_addr: SocketAddr,
-        cookie_getter: Arc<dyn CookieGetter>,
+        conn: Mutex<Connection>,
         network: Network,
         signal: Waiter,
         blocktxids_cache: Arc<BlockTxIDsCache>,
@@ -309,14 +318,10 @@ impl Daemon {
         let daemon = Daemon {
             daemon_dir: daemon_dir.clone(),
             network,
-            conn: Mutex::new(Connection::new(
-                daemon_rpc_addr,
-                cookie_getter,
-                signal.clone(),
-            )?),
+            conn,
             message_id: Counter::new(),
-            blocktxids_cache,
             signal,
+            blocktxids_cache,
             latency: metrics.histogram_vec(
                 HistogramOpts::new(
                     "electrscash_daemon_rpc",
@@ -333,11 +338,11 @@ impl Daemon {
         Ok(daemon)
     }
 
-    pub fn reconnect(&self) -> Result<Daemon> {
+    pub async fn reconnect(&self) -> Result<Daemon> {
         Ok(Daemon {
             daemon_dir: self.daemon_dir.clone(),
             network: self.network,
-            conn: Mutex::new(self.conn.lock().unwrap().reconnect()?),
+            conn: Mutex::new(self.conn.lock().await.reconnect().await?),
             message_id: Counter::new(),
             signal: self.signal.clone(),
             blocktxids_cache: Arc::clone(&self.blocktxids_cache),
@@ -346,15 +351,24 @@ impl Daemon {
         })
     }
 
-    pub fn list_blk_files(&self) -> Result<Vec<PathBuf>> {
+    pub async fn list_blk_files(&self) -> Result<Vec<PathBuf>> {
         let mut path = self.daemon_dir.clone();
         path.push("blocks");
-        path.push("blk*.dat");
         info!("listing block files at {:?}", path);
-        let mut paths: Vec<PathBuf> = glob::glob(path.to_str().unwrap())
-            .chain_err(|| "failed to list blk*.dat files")?
-            .map(std::result::Result::unwrap)
-            .collect();
+        let mut paths: Vec<PathBuf> = vec![];
+        let mut dir = read_dir(path).await.chain_err(|| "failed to list blk files")?;
+        while let Some(entry) = dir.next().await {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if !name.starts_with("blk") {
+                continue;
+            }
+            if !name.ends_with(".dat") {
+                continue;
+            }
+            paths.push(entry.path())
+        }
+
         paths.sort();
         Ok(paths)
     }
@@ -364,14 +378,14 @@ impl Daemon {
     }
 
     async fn call_jsonrpc(&self, method: &str, request: &Value) -> Result<Value> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().await;
         let timer = self.latency.with_label_values(&[method]).start_timer();
         let request = request.to_string();
-        conn.send(&request)?;
+        conn.send(&request).await?;
         self.size
             .with_label_values(&[method, "send"])
             .observe(request.len() as f64);
-        let response = conn.recv()?;
+        let response = conn.recv().await?;
         let result: Value = from_str(&response).chain_err(|| "invalid JSON")?;
         timer.observe_duration();
         self.size
@@ -407,8 +421,8 @@ impl Daemon {
                 Err(Error(ErrorKind::Connection(msg), _)) => {
                     warn!("reconnecting to bitcoind: {}", msg);
                     self.signal.wait(Duration::from_secs(3))?;
-                    let mut conn = self.conn.lock().unwrap();
-                    *conn = conn.reconnect()?;
+                    let mut conn = self.conn.lock().await;
+                    *conn = conn.reconnect().await?;
                     continue;
                 }
                 result => return result,

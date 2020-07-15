@@ -204,7 +204,7 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn load(
+    pub async fn load(
         store: &dyn ReadStore,
         daemon: &Daemon,
         metrics: &Metrics,
@@ -216,7 +216,7 @@ impl Index {
         stats.height.set((headers.len() as i64) - 1);
         Ok(Index {
             headers: RwLock::new(headers),
-            daemon: daemon.reconnect()?,
+            daemon: daemon.reconnect().await?,
             stats,
             batch_size,
             cashaccount_activation_height,
@@ -250,7 +250,7 @@ impl Index {
         store: &impl WriteStore,
         waiter: &Waiter,
     ) -> Result<(Vec<HeaderEntry>, HeaderEntry)> {
-        let daemon = self.daemon.reconnect()?;
+        let daemon = self.daemon.reconnect().await?;
         let tip = daemon.getbestblockhash().await?;
         let new_headers: Vec<HeaderEntry> = {
             let indexed_headers = self.headers.read().unwrap();

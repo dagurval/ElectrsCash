@@ -13,7 +13,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
+    pub async fn new(
         store: store::DBStore,
         index: index::Index,
         daemon: daemon::Daemon,
@@ -22,7 +22,7 @@ impl App {
         Ok(Arc::new(App {
             store,
             index,
-            daemon: daemon.reconnect()?,
+            daemon: daemon.reconnect().await?,
             banner: config.server_banner.clone(),
             tip: Mutex::new(BlockHash::default()),
         }))

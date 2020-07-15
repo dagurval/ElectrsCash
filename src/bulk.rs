@@ -4,7 +4,7 @@ use bitcoin::hash_types::BlockHash;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use async_std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{Receiver, SyncSender},
     Arc, Mutex,
@@ -238,7 +238,7 @@ pub async fn index_blk_files(
     cashaccount_activation_height: u32,
 ) -> Result<DBStore> {
     set_open_files_limit(2048); // twice the default `ulimit -n` value
-    let blk_files = daemon.list_blk_files()?;
+    let blk_files = daemon.list_blk_files().await?;
     info!("indexing {} blk*.dat files", blk_files.len());
     let indexed_blockhashes = read_indexed_blockhashes(&store);
     debug!("found {} indexed blocks", indexed_blockhashes.len());
