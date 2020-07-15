@@ -104,7 +104,7 @@ impl Parser {
                     .expect("indexed_blockhashes")
                     .insert(blockhash)
                 {
-                    rows.extend(index_block(&block, header.height(), &cashaccount));
+                    rows.extend(index_block(&block, header.height() as u32, &cashaccount));
                     self.block_count.with_label_values(&["indexed"]).inc();
                 } else {
                     self.block_count.with_label_values(&["duplicate"]).inc();

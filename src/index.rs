@@ -1,5 +1,5 @@
 use bitcoin::blockdata::block::{Block, BlockHeader};
-use bitcoin::blockdata::transaction::{Transaction, TxIn};
+use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin_hashes::Hash;
@@ -10,7 +10,7 @@ use std::sync::RwLock;
 
 use crate::cashaccount::CashAccountParser;
 use crate::daemon::Daemon;
-use crate::db::encode_varint_u64;
+use crate::db::inputs::TxInRow;
 use crate::db::outputs::TxOutRow;
 use crate::errors::*;
 use crate::metrics::{
@@ -20,55 +20,9 @@ use crate::scripthash::{full_hash, FullHash};
 use crate::signal::Waiter;
 use crate::store::{ReadStore, Row, WriteStore};
 use crate::util::{
-    hash_prefix, spawn_thread, Bytes, HashPrefix, HeaderEntry, HeaderList, HeaderMap, SyncChannel,
+    spawn_thread, Bytes, HashPrefix, HeaderEntry, HeaderList, HeaderMap, SyncChannel,
 };
 use bitcoin::BitcoinHash;
-
-#[derive(Serialize, Deserialize)]
-pub struct TxInKey {
-    pub code: u8,
-    pub prev_hash_prefix: HashPrefix,
-    prev_index: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TxInRow {
-    key: TxInKey,
-    pub txid_prefix: HashPrefix,
-}
-
-impl TxInRow {
-    pub fn new(txid: &Txid, input: &TxIn) -> TxInRow {
-        TxInRow {
-            key: TxInKey {
-                code: b'I',
-                prev_hash_prefix: hash_prefix(&input.previous_output.txid[..]),
-                prev_index: encode_varint_u64(input.previous_output.vout as u64),
-            },
-            txid_prefix: hash_prefix(&txid[..]),
-        }
-    }
-
-    pub fn filter(txid: &Txid, output_index: usize) -> Bytes {
-        bincode::serialize(&TxInKey {
-            code: b'I',
-            prev_hash_prefix: hash_prefix(&txid[..]),
-            prev_index: encode_varint_u64(output_index as u64),
-        })
-        .unwrap()
-    }
-
-    pub fn to_row(&self) -> Row {
-        Row {
-            key: bincode::serialize(&self).unwrap(),
-            value: vec![],
-        }
-    }
-
-    pub fn from_row(row: &Row) -> TxInRow {
-        bincode::deserialize(&row.key).expect("failed to parse TxInRow")
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct TxKey {
@@ -127,7 +81,7 @@ struct BlockKey {
 
 pub fn index_transaction<'a>(
     txn: &'a Transaction,
-    height: usize,
+    height: u32,
     cashaccount: Option<&CashAccountParser>,
 ) -> impl 'a + Iterator<Item = Row> {
     let null_hash = Txid::default();
@@ -137,29 +91,29 @@ pub fn index_transaction<'a>(
         if input.previous_output.txid == null_hash {
             None
         } else {
-            Some(TxInRow::new(&txid, &input).to_row())
+            Some(TxInRow::new(txid, &input, height).to_row())
         }
     });
     let outputs = txn
         .output
         .iter()
         .enumerate()
-        .map(move |(i, output)| TxOutRow::new(txid, &output, i as u32, height as u32).to_row());
+        .map(move |(i, output)| TxOutRow::new(txid, &output, i as u32, height).to_row());
 
     let cashaccount_row = match cashaccount {
-        Some(cashaccount) => cashaccount.index_cashaccount(txn, height as u32),
+        Some(cashaccount) => cashaccount.index_cashaccount(txn, height),
         None => None,
     };
     // Persist transaction ID and confirmed height
     inputs
         .chain(outputs)
-        .chain(std::iter::once(TxRow::new(&txid, height as u32).to_row()))
+        .chain(std::iter::once(TxRow::new(&txid, height).to_row()))
         .chain(cashaccount_row)
 }
 
 pub fn index_block<'a>(
     block: &'a Block,
-    height: usize,
+    height: u32,
     cashaccount: &'a CashAccountParser,
 ) -> impl 'a + Iterator<Item = Row> {
     let blockhash = block.bitcoin_hash();
@@ -393,8 +347,9 @@ impl Index {
                     .get(&blockhash)
                     .unwrap_or_else(|| panic!("missing header for block {}", blockhash));
 
-                self.stats.update(block, height); // TODO: update stats after the block is indexed
-                index_block(block, height, &cashaccount)
+                // TODO: update stats after the block is indexed
+                self.stats.update(block, height);
+                index_block(block, height as u32, &cashaccount)
                     .chain(std::iter::once(last_indexed_block(&blockhash)))
             });
 

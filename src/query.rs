@@ -13,9 +13,11 @@ use std::sync::{Arc, RwLock};
 use crate::app::App;
 use crate::cache::TransactionCache;
 use crate::cashaccount::{txids_by_cashaccount, CashAccountParser};
+use crate::db::inputs::get_txin;
+use crate::db::inputs::TxInRow;
 use crate::db::outputs::{get_txouts, TxOutRow};
 use crate::errors::*;
-use crate::index::{TxInRow, TxRow};
+use crate::index::TxRow;
 use crate::mempool::{Tracker, MEMPOOL_HEIGHT};
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::scripthash::FullHash;
@@ -59,11 +61,22 @@ impl FundingOutput {
 type OutPoint = (Txid, u32); // (txid, output_index)
 
 struct SpendingInput {
-    txn_id: Txid,
-    height: u32,
+    txin: TxInRow,
     funding_output: OutPoint,
     value: u64,
     state: ConfirmationState,
+}
+
+impl SpendingInput {
+    #[inline]
+    pub fn height(&self) -> u32 {
+        self.txin.get_confirmed_height()
+    }
+
+    #[inline]
+    pub fn txid(&self) -> &Txid {
+        self.txin.get_txid()
+    }
 }
 
 pub struct Status {
@@ -107,11 +120,11 @@ impl Status {
         }
         for s in self.spending() {
             let height: i32 = match s.state {
-                ConfirmationState::Confirmed => s.height as i32,
+                ConfirmationState::Confirmed => s.height() as i32,
                 ConfirmationState::InMempool => 0,
                 ConfirmationState::UnconfirmedParent => -1,
             };
-            txns_map.insert(s.txn_id, height as i32);
+            txns_map.insert(*s.txid(), height as i32);
         }
         let mut txns: Vec<(i32, Txid)> =
             txns_map.into_iter().map(|item| (item.1, item.0)).collect();
@@ -219,18 +232,6 @@ fn txrows_by_prefix(store: &dyn ReadStore, txid_prefix: HashPrefix) -> Vec<TxRow
         .collect()
 }
 
-fn txids_by_funding_output(
-    store: &dyn ReadStore,
-    txn_id: &Txid,
-    output_index: u32,
-) -> Vec<HashPrefix> {
-    store
-        .scan(&TxInRow::filter(&txn_id, output_index as usize))
-        .iter()
-        .map(|row| TxInRow::from_row(row).txid_prefix)
-        .collect()
-}
-
 pub struct Query {
     app: Arc<App>,
     tracker: RwLock<Tracker>,
@@ -277,56 +278,18 @@ impl Query {
         &self,
         store: &dyn ReadStore,
         funding: &FundingOutput,
-        timeout: &TimeoutTrigger,
-    ) -> Result<Option<SpendingInput>> {
-        let spending_txns = txids_by_funding_output(store, funding.txid(), funding.output_index());
-
-        if spending_txns.len() == 1 {
-            let spender_txid = &spending_txns[0];
-            let txrows = txrows_by_prefix(store, *spender_txid);
-            if txrows.len() == 1 {
-                // One match, assume it's correct to avoid load_txn lookup.
-                let txid = txrows[0].get_txid();
-                return Ok(Some(SpendingInput {
-                    txn_id: txid,
-                    height: txrows[0].height,
-                    funding_output: (*funding.txid(), funding.output_index()),
-                    value: funding.value(),
-                    state: self.check_confirmation_state(&txid, txrows[0].height),
-                }));
-            }
+    ) -> Option<SpendingInput> {
+        let txin = get_txin(store, *funding.txid(), funding.output_index()).await;
+        if let Some(txin) = txin {
+            let state = self.check_confirmation_state(txin.get_txid(), txin.get_confirmed_height());
+            return Some(SpendingInput {
+                txin,
+                funding_output: (*funding.txid(), funding.output_index()),
+                value: funding.value(),
+                state,
+            });
         }
-
-        // ambiguity, fetch from bitcoind to verify
-        let spending_txns: Vec<TxnHeight> = self
-            .load_txns_by_prefix(
-                store,
-                txids_by_funding_output(store, funding.txid(), funding.output_index()),
-            )
-            .await?;
-        let mut spending_inputs = vec![];
-        for t in &spending_txns {
-            for input in t.txn.input.iter() {
-                if input.previous_output.txid == *funding.txid()
-                    && input.previous_output.vout == funding.output_index()
-                {
-                    spending_inputs.push(SpendingInput {
-                        txn_id: t.txn.txid(),
-                        height: t.height,
-                        funding_output: (*funding.txid(), funding.output_index()),
-                        value: funding.value(),
-                        state: self.check_confirmation_state(&t.txn.txid(), t.height),
-                    })
-                }
-            }
-            timeout.check()?;
-        }
-        assert!(spending_inputs.len() <= 1);
-        Ok(if spending_inputs.len() == 1 {
-            Some(spending_inputs.remove(0))
-        } else {
-            None
-        })
+        None
     }
 
     fn check_confirmation_state(&self, txid: &Txid, height: u32) -> ConfirmationState {
@@ -369,10 +332,7 @@ impl Query {
 
         for funding_output in &funding {
             timeout.check()?;
-            if let Some(spent) = self
-                .find_spending_input(read_store, &funding_output, timeout)
-                .await?
-            {
+            if let Some(spent) = self.find_spending_input(read_store, &funding_output).await {
                 spending.push(spent);
             }
         }
@@ -398,8 +358,8 @@ impl Query {
         for funding_output in funding.iter().chain(confirmed_funding.iter()) {
             timeout.check()?;
             if let Some(spent) = self
-                .find_spending_input(tracker.index(), &funding_output, timeout)
-                .await?
+                .find_spending_input(tracker.index(), &funding_output)
+                .await
             {
                 spending.push(spent);
             }

@@ -1,3 +1,4 @@
+pub mod inputs;
 pub mod outputs;
 
 pub fn encode_varint_u32(value: u32) -> Vec<u8> {

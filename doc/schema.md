@@ -16,7 +16,7 @@ Allows efficiently finding spending transaction of a specific output:
 
 |  Code  | Funding TxID Prefix  | Funding Output Index  | Spending TxID Prefix  |   |
 | ------ | -------------------- | --------------------- | --------------------- | - |
-| `b'I'` | `txid[:8]`           | `varint`              | `txid[:8]`            |   |
+| `b'I'` | `txid` (32 bytes)    | `varint`              | `txid` (32 bytes)     |   |
 
 
 ## Full Transaction IDs
