@@ -126,16 +126,20 @@ impl TransactionCache {
         if let Some(txn) = self.get(txid) {
             return Ok(txn);
         }
-        let tx_hex = daemon.gettransaction_raw(txid, None, false).await?;
+        let tx_hex = daemon.gettransaction_raw(txid, false).await?;
         let tx_hex = tx_hex.as_str().chain_err(|| "non-string tx")?;
         let serialized_txn = hex::decode(tx_hex).chain_err(|| "non-hex tx")?;
         let txn = deserialize(&serialized_txn).chain_err(|| "failed to parse serialized tx")?;
+        self.put_serialized(*txid, serialized_txn);
+        Ok(txn)
+    }
+
+    pub fn put_serialized(&self, txid: Txid, serialized_txn: Vec<u8>) {
         let byte_size = 32 /* key (hash size) */ + serialized_txn.len();
         self.map
             .lock()
             .unwrap()
-            .put(*txid, serialized_txn, byte_size);
-        Ok(txn)
+            .put(txid, serialized_txn, byte_size);
     }
 
     pub fn get(&self, txid: &Txid) -> Option<Transaction> {

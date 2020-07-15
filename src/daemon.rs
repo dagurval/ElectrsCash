@@ -511,28 +511,12 @@ impl Daemon {
         Ok(blocks)
     }
 
-    pub async fn gettransaction(
-        &self,
-        txhash: &Txid,
-        blockhash: Option<BlockHash>,
-    ) -> Result<Transaction> {
-        let mut args = json!([txhash.to_hex(), /*verbose=*/ false]);
-        if let Some(blockhash) = blockhash {
-            args.as_array_mut().unwrap().push(json!(blockhash.to_hex()));
-        }
-        tx_from_value(self.request("getrawtransaction", args).await?)
+    pub async fn gettransaction(&self, txid: &Txid) -> Result<Transaction> {
+        tx_from_value(self.gettransaction_raw(txid, false).await?)
     }
 
-    pub async fn gettransaction_raw(
-        &self,
-        txhash: &Txid,
-        blockhash: Option<&BlockHash>,
-        verbose: bool,
-    ) -> Result<Value> {
-        let mut args = json!([txhash.to_hex(), verbose]);
-        if let Some(blockhash) = blockhash {
-            args.as_array_mut().unwrap().push(json!(blockhash.to_hex()));
-        }
+    pub async fn gettransaction_raw(&self, txhash: &Txid, verbose: bool) -> Result<Value> {
+        let args = json!([txhash.to_hex(), verbose]);
         Ok(self.request("getrawtransaction", args).await?)
     }
 

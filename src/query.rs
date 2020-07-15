@@ -1,7 +1,9 @@
 use bitcoin::blockdata::transaction::Transaction;
+use bitcoin::consensus::encode::deserialize;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode, Txid};
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
+use bitcoin_hashes::hex::FromHex;
 use bitcoin_hashes::hex::ToHex;
 use bitcoin_hashes::Hash;
 use crypto::digest::Digest;
@@ -18,11 +20,10 @@ use crate::db::inputs::get_txin;
 use crate::db::inputs::TxInRow;
 use crate::db::outputs::{get_txouts, TxOutRow};
 use crate::errors::*;
-use crate::index::TxRow;
 use crate::mempool::{Tracker, MEMPOOL_HEIGHT};
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::scripthash::FullHash;
-use crate::store::{ReadStore, Row};
+use crate::store::ReadStore;
 use crate::timeout::TimeoutTrigger;
 use crate::util::HeaderEntry;
 
@@ -213,13 +214,6 @@ fn create_merkle_branch_and_root<T: Hash>(mut hashes: Vec<T>, mut index: usize) 
     (merkle, hashes[0])
 }
 
-// TODO: the functions below can be part of ReadStore.
-fn txrow_by_txid(store: &dyn ReadStore, txid: &Txid) -> Option<TxRow> {
-    let key = TxRow::filter_full(&txid);
-    let value = store.get(&key)?;
-    Some(TxRow::from_row(&Row { key, value }))
-}
-
 pub struct Query {
     app: Arc<App>,
     tracker: RwLock<Tracker>,
@@ -369,36 +363,6 @@ impl Query {
         Ok(Status { confirmed, mempool })
     }
 
-    pub fn lookup_blockheader(
-        &self,
-        tx_hash: &Txid,
-        block_height: Option<u32>,
-    ) -> Result<Option<HeaderEntry>> {
-        if self.tracker.read().unwrap().get_txn(&tx_hash).is_some() {
-            return Ok(None);
-        }
-        // Lookup in confirmed transactions' index
-        let height = match block_height {
-            Some(height) => {
-                if height == MEMPOOL_HEIGHT {
-                    return Ok(None);
-                }
-                height
-            }
-            None => {
-                txrow_by_txid(self.app.read_store(), &tx_hash)
-                    .chain_err(|| format!("not indexed tx {}", tx_hash))?
-                    .height
-            }
-        };
-        let header = self
-            .app
-            .index()
-            .get_header(height as usize)
-            .chain_err(|| format!("missing header at height {}", height))?;
-        Ok(Some(header))
-    }
-
     pub fn best_header(&self) -> Option<HeaderEntry> {
         self.app.index().best_header()
     }
@@ -412,6 +376,36 @@ impl Query {
 
     async fn load_txn_from_bitcoind(&self, txid: &Txid) -> Result<Transaction> {
         self.tx_cache.get_or_fetch(&txid, self.app.daemon()).await
+    }
+
+    pub async fn load_txn_with_blockheader(
+        &self,
+        txid: Txid,
+    ) -> Result<(Transaction, Option<HeaderEntry>)> {
+        let _timer = self
+            .duration
+            .with_label_values(&["load_txn_with_header"])
+            .start_timer();
+
+        let rawtx = self.app.daemon().gettransaction_raw(&txid, true).await?;
+
+        // Deserialize transaction
+        let txhex = rawtx["hex"]
+            .as_str()
+            .chain_err(|| "invalid tx hex from bitcoind")?;
+        let txserialized = hex::decode(txhex).chain_err(|| "non-hex tx from bitcoind")?;
+        let tx = deserialize(&txserialized).chain_err(|| "failed to parse tx from bitcoind")?;
+        self.tx_cache.put_serialized(txid, txserialized);
+
+        // Fetch header from own data store
+        let blockhash = rawtx["blockhash"]
+            .as_str()
+            .chain_err(|| "invalid blockhash from bitcoind")?;
+        let blockhash =
+            BlockHash::from_hex(blockhash).chain_err(|| "non-hex blockhash from bitcoind")?;
+        let header = self.app.index().get_header_by_blockhash(&blockhash);
+
+        Ok((tx, header))
     }
 
     pub async fn load_txn(&self, txid: &Txid) -> Result<Transaction> {

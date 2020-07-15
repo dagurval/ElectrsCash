@@ -2,7 +2,6 @@ use bitcoin::blockdata::block::{Block, BlockHeader};
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin_hashes::Hash;
 use futures::executor::block_on;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
@@ -19,59 +18,8 @@ use crate::metrics::{
 use crate::scripthash::{full_hash, FullHash};
 use crate::signal::Waiter;
 use crate::store::{ReadStore, Row, WriteStore};
-use crate::util::{
-    spawn_thread, Bytes, HashPrefix, HeaderEntry, HeaderList, HeaderMap, SyncChannel,
-};
+use crate::util::{spawn_thread, HeaderEntry, HeaderList, HeaderMap, SyncChannel};
 use bitcoin::BitcoinHash;
-
-#[derive(Serialize, Deserialize)]
-pub struct TxKey {
-    code: u8,
-    pub txid: [u8; 32],
-}
-
-pub struct TxRow {
-    pub key: TxKey,
-    pub height: u32, // value
-}
-
-impl TxRow {
-    pub fn new(txid: &Txid, height: u32) -> TxRow {
-        TxRow {
-            key: TxKey {
-                code: b'T',
-                txid: full_hash(&txid[..]),
-            },
-            height,
-        }
-    }
-
-    pub fn filter_prefix(txid_prefix: HashPrefix) -> Bytes {
-        [b"T", &txid_prefix[..]].concat()
-    }
-
-    pub fn filter_full(txid: &Txid) -> Bytes {
-        [b"T", &txid[..]].concat()
-    }
-
-    pub fn to_row(&self) -> Row {
-        Row {
-            key: bincode::serialize(&self.key).unwrap(),
-            value: bincode::serialize(&self.height).unwrap(),
-        }
-    }
-
-    pub fn from_row(row: &Row) -> TxRow {
-        TxRow {
-            key: bincode::deserialize(&row.key).expect("failed to parse TxKey"),
-            height: bincode::deserialize(&row.value).expect("failed to parse height"),
-        }
-    }
-
-    pub fn get_txid(&self) -> Txid {
-        Txid::from_slice(&self.key.txid).unwrap()
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 struct BlockKey {
@@ -105,10 +53,7 @@ pub fn index_transaction<'a>(
         None => None,
     };
     // Persist transaction ID and confirmed height
-    inputs
-        .chain(outputs)
-        .chain(std::iter::once(TxRow::new(&txid, height).to_row()))
-        .chain(cashaccount_row)
+    inputs.chain(outputs).chain(cashaccount_row)
 }
 
 pub fn index_block<'a>(
@@ -284,8 +229,7 @@ impl Index {
     }
 
     pub fn best_header(&self) -> Option<HeaderEntry> {
-        let headers = self.headers.read().unwrap();
-        headers.header_by_blockhash(&headers.tiphash()).cloned()
+        self.get_header_by_blockhash(&self.headers.read().unwrap().tiphash())
     }
 
     pub fn get_header(&self, height: usize) -> Option<HeaderEntry> {
@@ -294,6 +238,11 @@ impl Index {
             .unwrap()
             .header_by_height(height)
             .cloned()
+    }
+
+    pub fn get_header_by_blockhash(&self, blockhash: &BlockHash) -> Option<HeaderEntry> {
+        let headers = self.headers.read().unwrap();
+        headers.header_by_blockhash(blockhash).cloned()
     }
 
     pub async fn update(

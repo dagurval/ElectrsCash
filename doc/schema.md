@@ -19,17 +19,6 @@ Allows efficiently finding spending transaction of a specific output:
 | `b'I'` | `txid` (32 bytes)    | `varint`              | `txid` (32 bytes)     |   |
 
 
-## Full Transaction IDs
-
-In order to save storage space, we store the full transaction IDs once, and use their 8-byte prefixes for the indexes above.
-
-|  Code  | Transaction ID    |   | Confirmed height   |
-| ------ | ----------------- | - | ------------------ |
-| `b'T'` | `txid` (32 bytes) |   | `uint32`           |
-
-Note that this mapping allows us to use `getrawtransaction` RPC to retrieve actual transaction data from without `-txindex` enabled
-(by explicitly specifying the [blockhash](https://github.com/bitcoin/bitcoin/commit/497d0e014cc79d46531d570e74e4aeae72db602d)).
-
 ## CashAccount index
 
 Allows finding all transactions containing CashAccount registration by name and block height.

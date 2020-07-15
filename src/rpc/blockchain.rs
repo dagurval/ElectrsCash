@@ -238,7 +238,7 @@ impl BlockchainRPC {
             let tx = self.query.load_txn(&tx_hash).await?;
             Ok(json!(hex::encode(serialize(&tx))))
         } else {
-            let header = self.query.lookup_blockheader(&tx_hash, None)?;
+            let (tx, header) = self.query.load_txn_with_blockheader(tx_hash).await?;
             let blocktime = match header {
                 Some(ref header) => header.header().time,
                 None => 0,
@@ -258,7 +258,6 @@ impl BlockchainRPC {
                 None => 0,
             };
             let blockhash = header.map(|h| *h.hash());
-            let tx = self.query.load_txn(&tx_hash).await?;
 
             let tx_serialized = serialize(&tx);
             Ok(json!({
