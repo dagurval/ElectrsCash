@@ -452,7 +452,7 @@ impl Query {
         let pos = txids
             .iter()
             .position(|txid| txid == tx_hash)
-            .chain_err(|| format!("missing txid {}", tx_hash))?;
+            .chain_err(|| format!("missing txid {} in block {}", tx_hash, header_entry.hash()))?;
         let tx_nodes: Vec<TxMerkleNode> = txids
             .into_iter()
             .map(|txid| TxMerkleNode::from_inner(txid.into_inner()))

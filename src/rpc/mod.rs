@@ -1,22 +1,24 @@
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::hash_types::Txid;
+use std::time::Duration;
+use std::sync::mpsc::TryRecvError;
 use error_chain::ChainedError;
+    use futures::stream::{FuturesUnordered, StreamExt};
 use futures::executor::block_on;
 use serde_json::{from_str, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use async_std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use crate::def::PROTOCOL_VERSION_MAX;
 use crate::errors::*;
 use crate::metrics::{HistogramOpts, MetricOpts, Metrics};
 use crate::query::Query;
 use crate::rpc::blockchain::BlockchainRPC;
-use crate::rpc::parseutil::usize_from_value;
+use crate::rpc::parseutil::{usize_from_value, str_from_value};
 use crate::rpc::rpcstats::RPCStats;
 use crate::rpc::server::{
     server_add_peer, server_banner, server_donation_address, server_features,
@@ -45,7 +47,7 @@ fn get_output_scripthash(txn: &Transaction, n: Option<usize>) -> Vec<FullHash> {
 
 struct Connection {
     query: Arc<Query>,
-    stream: TcpStream,
+    stream: Mutex<TcpStream>,
     addr: SocketAddr,
     chan: SyncChannel<Message>,
     stats: Arc<RPCStats>,
@@ -65,7 +67,7 @@ impl Connection {
     ) -> Connection {
         Connection {
             query: query.clone(),
-            stream,
+            stream: Mutex::new(stream),
             addr,
             chan: SyncChannel::new(buffer_size),
             stats: stats.clone(),
@@ -87,18 +89,22 @@ impl Connection {
     }
 
     async fn handle_command(
-        &mut self,
-        method: &str,
-        params: &[Value],
-        id: &Value,
+        &self,
+        cmd: Value,
     ) -> Result<Value> {
+        let empty_params = json!([]);
+
+        let method = str_from_value(cmd.get("method"), "method")?;
+        let params = cmd.get("params").unwrap_or_else(|| &empty_params).as_array().chain_err(|| "params not an array")?;
+        let id = cmd.get("id").chain_err(|| "id missing")?;
+
         let timer = self
             .stats
             .latency
-            .with_label_values(&[method])
+            .with_label_values(&[&method])
             .start_timer();
         let timeout = TimeoutTrigger::new(Duration::from_secs(self.rpc_timeout as u64));
-        let result = match method {
+        let result = match method.as_str() {
             "blockchain.address.get_balance" => {
                 self.blockchainrpc
                     .address_get_balance(&params, &timeout)
@@ -123,7 +129,7 @@ impl Connection {
             "blockchain.block.header" => self.blockchainrpc.block_header(&params),
             "blockchain.block.headers" => self.blockchainrpc.block_headers(&params),
             "blockchain.estimatefee" => self.blockchainrpc.estimatefee(&params),
-            "blockchain.headers.subscribe" => self.blockchainrpc.headers_subscribe(),
+            "blockchain.headers.subscribe" => self.blockchainrpc.headers_subscribe().await,
             "blockchain.relayfee" => self.blockchainrpc.relayfee(),
             "blockchain.scripthash.get_balance" => {
                 self.blockchainrpc
@@ -149,7 +155,7 @@ impl Connection {
                     .await
             }
             "blockchain.scripthash.unsubscribe" => {
-                self.blockchainrpc.scripthash_unsubscribe(&params)
+                self.blockchainrpc.scripthash_unsubscribe(&params).await
             }
             "blockchain.transaction.broadcast" => {
                 self.blockchainrpc.transaction_broadcast(&params).await
@@ -177,20 +183,19 @@ impl Connection {
             .into()),
         };
         timer.observe_duration();
-        // TODO: return application errors should be sent to the client
-        Ok(if let Err(e) = result {
+        if let Err(e) = result {
             match *e.kind() {
                 ErrorKind::RpcError(ref code, _) => {
                     // Use (at most) two errors from the error chain to produce
                     // an error descrption.
                     let errmsgs: Vec<String> = e.iter().take(2).map(|x| x.to_string()).collect();
                     let errmsgs = errmsgs.join("; ");
-                    json!({"jsonrpc": "2.0",
+                    Ok(json!({"jsonrpc": "2.0",
                     "id": id,
                     "error": {
                         "code": *code as i32,
                         "message": errmsgs,
-                    }})
+                    }}))
                 }
                 _ => {
                     warn!(
@@ -201,23 +206,24 @@ impl Connection {
                         e.display_chain()
                     );
 
-                    json!({"jsonrpc": "2.0",
+                    Ok(json!({"jsonrpc": "2.0",
                     "id": id,
                     "error": {
                         "code": RpcErrorCode::InternalError as i32,
                         "message": e.to_string()
-                    }})
+                    }}))
                 }
             }
         } else {
-            json!({"jsonrpc": "2.0", "id": id, "result": result.unwrap() })
-        })
+            Ok(json!({"jsonrpc": "2.0", "id": id, "result": result.unwrap() }))
+        }
     }
 
-    pub fn send_values(&mut self, values: &[Value]) -> Result<()> {
+    pub async fn send_values(&self, values: &[Value]) -> Result<()> {
+        let mut stream = self.stream.lock().await;
         for value in values {
             let line = value.to_string() + "\n";
-            if let Err(e) = self.stream.write_all(line.as_bytes()) {
+            if let Err(e) = stream.write_all(line.as_bytes()) {
                 let truncated: String = line.chars().take(80).collect();
                 return Err(e).chain_err(|| format!("failed to send {}", truncated));
             }
@@ -226,41 +232,59 @@ impl Connection {
     }
 
     async fn handle_replies(&mut self) -> Result<()> {
-        let empty_params = json!([]);
+
+        let mut tasks = FuturesUnordered::new();
         loop {
-            let msg = self.chan.receiver().recv().chain_err(|| "channel closed")?;
+
+            /*if tasks.len() > 1000 {
+                // TODO: Wait with reading more messages, sleep and continue.
+            }*/
+
+            let msg = self.chan.receiver().try_recv();
             match msg {
-                Message::Request(line) => {
+                Err(TryRecvError::Empty) => {
+
+                    // No more requests from client to start processing, wait for
+                    // a task to complete and reply to it.
+                    // TODO: Wait for the first task to complete. Not just next task.
+
+                    match tasks.next().await {
+                        Some(reply) => {
+                            let reply = reply?;
+                            self.send_values(&[reply]).await?;
+                        }
+                        None => {
+                            // No requests pending, block thread and try again.
+                            async_std::task::sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+
+                    }
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    bail!("channel closed");
+                }
+
+                Ok(Message::Request(line)) => {
                     trace!("RPC {:?}", line);
                     let cmd: Value = from_str(&line).chain_err(|| "invalid JSON format")?;
-                    let reply = match (
-                        cmd.get("method"),
-                        cmd.get("params").unwrap_or_else(|| &empty_params),
-                        cmd.get("id"),
-                    ) {
-                        (
-                            Some(&Value::String(ref method)),
-                            &Value::Array(ref params),
-                            Some(ref id),
-                        ) => self.handle_command(method, params, id).await?,
-                        _ => bail!("invalid command: {}", cmd),
-                    };
-                    self.send_values(&[reply])?
+                    tasks.push(self.handle_command(cmd));
                 }
-                Message::ScriptHashChange(hash) => {
-                    let notification = self.blockchainrpc.on_scripthash_change(hash).await?;
-                    if let Some(n) = notification {
-                        self.send_values(&[n])?;
+
+                Ok(Message::ScriptHashChange(hash)) => {
+                    if let Some(reply) = self.blockchainrpc.on_scripthash_change(hash).await? {
+                        self.send_values(&[reply]).await?;
                     }
                 }
-                Message::ChainTipChange(tip) => {
-                    let notification = self.blockchainrpc.on_chaintip_change(tip)?;
-                    if let Some(n) = notification {
-                        self.send_values(&[n])?;
+
+                Ok(Message::ChainTipChange(tip)) => {
+                    if let Some(reply) = self.blockchainrpc.on_chaintip_change(tip).await? {
+                        self.send_values(&[reply]).await?;
                     }
                 }
-                Message::Done => return Ok(()),
-            }
+                Ok(Message::Done) => return Ok(()),
+            };
         }
     }
 
@@ -293,7 +317,7 @@ impl Connection {
     }
 
     pub async fn run(mut self) {
-        let reader = BufReader::new(self.stream.try_clone().expect("failed to clone TcpStream"));
+        let reader = BufReader::new(self.stream.lock().await.try_clone().expect("failed to clone TcpStream"));
         let tx = self.chan.sender();
         let child = spawn_thread("reader", || Connection::handle_requests(reader, tx));
         if let Err(e) = self.handle_replies().await {
@@ -304,7 +328,7 @@ impl Connection {
             );
         }
         debug!("[{}] shutting down connection", self.addr);
-        let _ = self.stream.shutdown(Shutdown::Both);
+        let _ = self.stream.lock().await.shutdown(Shutdown::Both);
         if let Err(err) = child.join().expect("receiver panicked") {
             error!("[{}] receiver failed: {}", self.addr, err);
         }
@@ -339,7 +363,7 @@ impl RPC {
     ) {
         spawn_thread("notification", move || {
             for msg in notification.receiver().iter() {
-                let mut senders = senders.lock().unwrap();
+                let mut senders = block_on(senders.lock());
                 match msg {
                     Notification::ScriptHashChange(hash) => senders.retain(|sender| {
                         if let Err(TrySendError::Disconnected(_)) =
@@ -439,7 +463,7 @@ impl RPC {
                             rpc_timeout,
                             rpc_buffer_size,
                         );
-                        senders.lock().unwrap().push(conn.chan.sender());
+                        block_on(senders.lock()).push(conn.chan.sender());
                         block_on(conn.run());
                         info!("[{}] disconnected peer", addr);
                         let _ = garbage_sender.send(std::thread::current().id());
@@ -456,8 +480,8 @@ impl RPC {
                         }
                     }
                 }
-                info!("closing {} RPC connections", senders.lock().unwrap().len());
-                for sender in senders.lock().unwrap().iter() {
+                info!("closing {} RPC connections", block_on(senders.lock()).len());
+                for sender in block_on(senders.lock()).iter() {
                     let _ = sender.send(Message::Done);
                 }
 

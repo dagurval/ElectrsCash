@@ -13,17 +13,19 @@ use crate::util::HeaderEntry;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::Txid;
+use bitcoin::hash_types::BlockHash;
 use bitcoin_hashes::hex::ToHex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use async_std::sync::Mutex;
 use std::time::Duration;
 
 pub struct BlockchainRPC {
     query: Arc<Query>,
     stats: Arc<RPCStats>,
-    status_hashes: HashMap<FullHash, Value>, // ScriptHash -> StatusHash
-    last_header_entry: Option<HeaderEntry>,
+    status_hashes: Mutex<HashMap<FullHash, Value>>, // ScriptHash -> StatusHash
+    last_header_entry: Mutex<Option<BlockHash>>,
     relayfee: f64,
     rpc_timeout: u16,
 }
@@ -38,8 +40,8 @@ impl BlockchainRPC {
         BlockchainRPC {
             query,
             stats,
-            status_hashes: HashMap::new(),
-            last_header_entry: None, // disable header subscription for now
+            status_hashes: Mutex::new(HashMap::new()),
+            last_header_entry: Mutex::new(None), // disable header subscription for now
             relayfee,
             rpc_timeout,
         }
@@ -150,11 +152,11 @@ impl BlockchainRPC {
         Ok(json!(fee_rate.max(self.relayfee)))
     }
 
-    pub fn headers_subscribe(&mut self) -> Result<Value> {
+    pub async fn headers_subscribe(&self) -> Result<Value> {
         let entry = self.query.get_best_header()?;
         let hex_header = hex::encode(serialize(entry.header()));
         let result = json!({"hex": hex_header, "height": entry.height()});
-        self.last_header_entry = Some(entry);
+        *self.last_header_entry.lock().await = Some(*entry.hash());
         Ok(result)
     }
 
@@ -195,23 +197,23 @@ impl BlockchainRPC {
     }
 
     pub async fn scripthash_subscribe(
-        &mut self,
+        &self,
         params: &[Value],
         timeout: &TimeoutTrigger,
     ) -> Result<Value> {
         let script_hash = scripthash_from_value(params.get(0))?;
         let status = self.query.status(&script_hash, timeout).await?;
         let result = status.hash().map_or(Value::Null, |h| json!(hex::encode(h)));
-        self.status_hashes.insert(script_hash, result.clone());
+        self.status_hashes.lock().await.insert(script_hash, result.clone());
         self.stats
             .subscriptions
-            .set(self.status_hashes.len() as i64);
+            .set(self.status_hashes.lock().await.len() as i64);
         Ok(result)
     }
 
-    pub fn scripthash_unsubscribe(&mut self, params: &[Value]) -> Result<Value> {
+    pub async fn scripthash_unsubscribe(&self, params: &[Value]) -> Result<Value> {
         let scripthash = scripthash_from_value(params.get(0))?;
-        let removed = self.status_hashes.remove(&scripthash).is_some();
+        let removed = self.status_hashes.lock().await.remove(&scripthash).is_some();
         Ok(json!(removed))
     }
 
@@ -321,21 +323,23 @@ impl BlockchainRPC {
             "merkle" : merkle_vec}))
     }
 
-    pub fn on_chaintip_change(&mut self, chaintip: HeaderEntry) -> Result<Option<Value>> {
+    pub async fn on_chaintip_change(&self, chaintip: HeaderEntry) -> Result<Option<Value>> {
         let timer = self
             .stats
             .latency
             .with_label_values(&["chaintip_update"])
             .start_timer();
 
-        if let Some(ref mut last_entry) = self.last_header_entry {
-            if *last_entry == chaintip {
+        let mut last_entry = self.last_header_entry.lock().await;
+
+        if last_entry.is_some() {
+            if last_entry.unwrap() == *chaintip.hash() {
                 return Ok(None);
             }
 
-            *last_entry = chaintip;
-            let hex_header = hex::encode(serialize(last_entry.header()));
-            let header = json!({"hex": hex_header, "height": last_entry.height()});
+            *last_entry = Some(*chaintip.hash());
+            let hex_header = hex::encode(serialize(chaintip.header()));
+            let header = json!({"hex": hex_header, "height": chaintip.height()});
             timer.observe_duration();
             return Ok(Some(json!({
                 "jsonrpc": "2.0",
@@ -345,9 +349,10 @@ impl BlockchainRPC {
         Ok(None)
     }
 
-    pub async fn on_scripthash_change(&mut self, scripthash: FullHash) -> Result<Option<Value>> {
+    pub async fn on_scripthash_change(&self, scripthash: FullHash) -> Result<Option<Value>> {
+        let status_hashes = self.status_hashes.lock().await;
         let old_statushash;
-        match self.status_hashes.get(&scripthash) {
+        match status_hashes.get(&scripthash) {
             Some(statushash) => {
                 old_statushash = statushash;
             }
@@ -372,7 +377,7 @@ impl BlockchainRPC {
                     "jsonrpc": "2.0",
                     "method": "blockchain.scripthash.subscribe",
                     "params": [scripthash.to_le_hex(), new_statushash]}));
-        self.status_hashes.insert(scripthash, new_statushash);
+        self.status_hashes.lock().await.insert(scripthash, new_statushash);
         timer.observe_duration();
         Ok(notification)
     }
