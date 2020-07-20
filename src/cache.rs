@@ -1,69 +1,16 @@
 use crate::daemon::Daemon;
 use crate::errors::*;
-use crate::metrics::{CounterVec, MetricOpts, Metrics};
+use crate::metrics::{MetricOpts, Metrics};
+use crate::rndcache::RndCache;
 
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hash_types::{BlockHash, Txid};
-use lru::LruCache;
-use prometheus::IntGauge;
-use std::hash::Hash;
 use std::sync::Mutex;
 
-struct SizedLruCache<K, V> {
-    map: LruCache<K, (V, usize)>,
-    bytes_usage: usize,
-    bytes_capacity: usize,
-    lookups: CounterVec,
-    usage: IntGauge,
-}
-
-impl<K: Hash + Eq, V> SizedLruCache<K, V> {
-    fn new(bytes_capacity: usize, lookups: CounterVec, usage: IntGauge) -> SizedLruCache<K, V> {
-        SizedLruCache {
-            map: LruCache::unbounded(),
-            bytes_usage: 0,
-            bytes_capacity,
-            lookups,
-            usage,
-        }
-    }
-
-    fn get(&mut self, key: &K) -> Option<&V> {
-        match self.map.get(key) {
-            None => {
-                self.lookups.with_label_values(&["miss"]).inc();
-                None
-            }
-            Some((value, _)) => {
-                self.lookups.with_label_values(&["hit"]).inc();
-                Some(value)
-            }
-        }
-    }
-
-    fn put(&mut self, key: K, value: V, byte_size: usize) {
-        if byte_size > self.bytes_capacity {
-            return;
-        }
-        if let Some((_, popped_size)) = self.map.put(key, (value, byte_size)) {
-            self.bytes_usage -= popped_size
-        }
-        self.bytes_usage += byte_size;
-
-        while self.bytes_usage > self.bytes_capacity {
-            match self.map.pop_lru() {
-                Some((_, (_, popped_size))) => self.bytes_usage -= popped_size,
-                None => break,
-            }
-        }
-
-        self.usage.set(self.bytes_usage as i64);
-    }
-}
 
 pub struct BlockTxIDsCache {
-    map: Mutex<SizedLruCache<BlockHash, Vec<Txid>>>,
+    map: Mutex<RndCache<BlockHash, Vec<Txid>>>,
 }
 
 impl BlockTxIDsCache {
@@ -80,7 +27,7 @@ impl BlockTxIDsCache {
             "Cache usage for list of transactions in a block (bytes)",
         ));
         BlockTxIDsCache {
-            map: Mutex::new(SizedLruCache::new(bytes_capacity, lookups, usage)),
+            map: Mutex::new(RndCache::new(bytes_capacity, lookups, usage)),
         }
     }
 
@@ -101,7 +48,7 @@ impl BlockTxIDsCache {
 
 pub struct TransactionCache {
     // Store serialized transaction (should use less RAM).
-    map: Mutex<SizedLruCache<Txid, Vec<u8>>>,
+    map: Mutex<RndCache<Txid, Vec<u8>>>,
 }
 
 impl TransactionCache {
@@ -118,7 +65,7 @@ impl TransactionCache {
             "Cache usage for list of transactions (bytes)",
         ));
         TransactionCache {
-            map: Mutex::new(SizedLruCache::new(bytes_capacity, lookups, usage)),
+            map: Mutex::new(RndCache::new(bytes_capacity, lookups, usage)),
         }
     }
 
