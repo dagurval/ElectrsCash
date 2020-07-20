@@ -48,9 +48,8 @@ cashaccount-sys = ">=0.1"
 c_fixed_string = "0.2"
 version-compare = "0.0.10"
 bitcoincash-addr = "0.5.1"
-futures = { version = "0.3.5", features = ["thread-pool"] }
+futures = "0.3.5"
 async-std = "1.6.2"
-rayon = "1.3.1"
 indexmap = "1.5.0"
 rand = "0.7.3"
 
