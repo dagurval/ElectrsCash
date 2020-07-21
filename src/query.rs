@@ -34,8 +34,8 @@ pub enum ConfirmationState {
 }
 
 pub struct FundingOutput {
-    txout: TxOutRow,
-    state: ConfirmationState,
+    pub txout: TxOutRow,
+    pub state: ConfirmationState,
 }
 
 impl FundingOutput {

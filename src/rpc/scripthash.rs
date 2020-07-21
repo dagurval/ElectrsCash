@@ -105,6 +105,9 @@ mod tests {
     use bitcoin::hash_types::Txid;
     use bitcoin_hashes::hex::FromHex;
     use serde_json::from_str;
+    use bitcoin::TxOut;
+    use bitcoin::Script;
+    use crate::db::outputs::TxOutRow;
 
     #[derive(Serialize, Deserialize)]
     struct Unspent {
@@ -114,12 +117,18 @@ mod tests {
         value: u64,
     }
 
-    fn create_out(height: u32, txn_id: Txid) -> FundingOutput {
-        FundingOutput {
-            txn_id,
-            height,
-            output_index: 0,
+    fn create_out(height: u32, txid: Txid) -> FundingOutput {
+        let txout = TxOut {
             value: 2020,
+            script_pubkey: Script::new(),
+        };
+        let output_index: u32 = 0;
+        FundingOutput {
+            txout: TxOutRow::new(
+                       txid,
+                       &txout,
+                       output_index,
+                       height),
             state: ConfirmationState::InMempool,
         }
     }

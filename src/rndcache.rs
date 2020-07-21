@@ -87,13 +87,23 @@ impl<K: Eq + Hash, V> RndCache<K, V> {
 mod tests {
     use super::*;
 
+    fn dummy_counter() -> CounterVec {
+        CounterVec::new(prometheus::Opts::new("name", "help"), &["type"]).unwrap()
+    }
+
+    fn dummy_gauge() -> IntGauge {
+        IntGauge::new("usage", "help").unwrap()
+    }
+
     #[test]
     fn test_insert_newitem() {
-        let mut cache: RndCache<i32, i32> = RndCache::new(100);
-        cache.put(10, 10, 10).unwrap();
+        let mut cache: RndCache<i32, i32> = RndCache::new(100,
+                                                          dummy_counter(),
+                                                          dummy_gauge());
+        cache.put(10, 10, 10);
         assert_eq!(&10, cache.get(&10).unwrap());
         assert!(!cache.get(&20).is_some());
-        cache.put(20, 20, 20).unwrap();
+        cache.put(20, 20, 20);
         assert_eq!(&10, cache.get(&10).unwrap());
         assert_eq!(&20, cache.get(&20).unwrap());
 
@@ -102,12 +112,14 @@ mod tests {
 
     #[test]
     fn test_insert_replace() {
-        let mut cache: RndCache<i32, i32> = RndCache::new(100);
-        cache.put(10, 10, 10).unwrap();
+        let mut cache: RndCache<i32, i32> = RndCache::new(100,
+                                                          dummy_counter(),
+                                                          dummy_gauge());
+        cache.put(10, 10, 10);
         assert_eq!(&10, cache.get(&10).unwrap());
         assert_eq!(10, cache.usage());
 
-        cache.put(10, 20, 20).unwrap();
+        cache.put(10, 20, 20);
         assert_eq!(&20, cache.get(&10).unwrap());
         assert_eq!(20, cache.usage());
     }
@@ -115,37 +127,41 @@ mod tests {
     #[test]
     fn test_too_big() {
         let capacity = 100;
-        let mut cache: RndCache<i32, i32> = RndCache::new(capacity);
+        let mut cache: RndCache<i32, i32> = RndCache::new(capacity,
+                                                          dummy_counter(),
+                                                          dummy_gauge());
 
-        assert!(cache.put(10, 10, capacity + 1).is_err());
+        cache.put(10, 10, capacity + 1);
         assert!(!cache.get(&10).is_some());
 
-        assert!(!cache.put(10, 10, capacity).is_err());
+        cache.put(10, 10, capacity);
         assert!(cache.get(&10).is_some());
 
-        assert!(!cache.put(10, 10, capacity - 1).is_err());
+        cache.put(10, 10, capacity - 1);
         assert!(cache.get(&10).is_some());
     }
 
     #[test]
     fn test_capacity() {
-        let mut cache: RndCache<&str, usize> = RndCache::new(300);
+        let mut cache: RndCache<&str, usize> = RndCache::new(300,
+                                                          dummy_counter(),
+                                                          dummy_gauge());
         assert_eq!(300, cache.capacity());
         assert_eq!(0, cache.usage());
-        cache.put("key1", 10, 100).unwrap();
+        cache.put("key1", 10, 100);
         assert_eq!(100, cache.usage());
 
         // replace cache entry
-        cache.put("key1", 10, 150).unwrap();
+        cache.put("key1", 10, 150);
         assert_eq!(150, cache.usage());
 
         // new entry
-        cache.put("key2", 10, 60).unwrap();
+        cache.put("key2", 10, 60);
         assert_eq!(210, cache.usage());
 
         // to make space for next entry, both previous entries need
         // to be evicted
-        cache.put("key3", 10, 250).unwrap();
+        cache.put("key3", 10, 250);
         assert_eq!(250, cache.usage());
     }
 
@@ -163,21 +179,23 @@ mod tests {
     fn test_evict() {
         let capacity = 300;
 
-        let mut cache: RndCache<&str, i32> = RndCache::new(capacity);
+        let mut cache: RndCache<&str, i32> = RndCache::new(capacity,
+                                                          dummy_counter(),
+                                                          dummy_gauge());
 
         // fill cache
-        cache.put("key1", 1, 100).unwrap();
-        cache.put("key2", 2, 100).unwrap();
-        cache.put("key3", 3, 100).unwrap();
+        cache.put("key1", 1, 100);
+        cache.put("key2", 2, 100);
+        cache.put("key3", 3, 100);
         assert_eq!(cache.capacity(), cache.usage());
         assert_eq!(3, count_hits(&cache, vec!("key1", "key2", "key3")));
 
         // evict 1
-        cache.put("key4", 4, 100).unwrap();
+        cache.put("key4", 4, 100);
         assert_eq!(2, count_hits(&cache, vec!("key1", "key2", "key3")));
 
         // evict all
-        cache.put("key5", 5, capacity).unwrap();
+        cache.put("key5", 5, capacity);
         assert_eq!(0, count_hits(&cache, vec!("key1", "key2", "key3")));
     }
 }

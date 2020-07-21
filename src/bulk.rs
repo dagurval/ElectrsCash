@@ -283,7 +283,6 @@ pub async fn index_blk_files(
 mod tests {
 
     use super::*;
-    use bitcoin_hashes::Hash;
     use hex::decode as hex_decode;
 
     #[test]
@@ -293,7 +292,7 @@ mod tests {
         let blocks = parse_blocks(raw_blocks, magic).unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(
-            blocks[1].bitcoin_hash().into_inner().to_vec(),
+            blocks[1].block_hash().to_vec(),
             hex_decode("d55acd552414cc44a761e8d6b64a4d555975e208397281d115336fc500000000").unwrap()
         );
     }
