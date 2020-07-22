@@ -135,3 +135,8 @@ name = "rpc_buffer_size"
 type = "usize"
 doc = "Size of the message queue for each peer. If set too small, subscription notifications may drop"
 default = "2000"
+
+[[switch]]
+name = "disable_full_compaction"
+doc = "Disables full compaction after initial sync."
+default = false

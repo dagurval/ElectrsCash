@@ -79,7 +79,13 @@ async fn run_server(config: &Config) -> Result<()> {
         // slower: uses JSONRPC for fetching blocks
         index.reload(&store); // load headers
         index.update(&store, &signal).await?;
-        full_compaction(store)
+        if !config.disable_full_compaction {
+            full_compaction(store)
+        }
+        else {
+            info!("Full compaction disabled.");
+            store
+        }
     } else {
         // faster, but uses more memory
         let store = bulk::index_blk_files(
@@ -91,7 +97,13 @@ async fn run_server(config: &Config) -> Result<()> {
             config.cashaccount_activation_height,
         )
         .await?;
-        let store = full_compaction(store);
+        let store = if !config.disable_full_compaction {
+            full_compaction(store)
+        }
+        else {
+            info!("Full compaction disabled.");
+            store
+        };
         index.reload(&store); // make sure the block header index is up-to-date
         store
     }

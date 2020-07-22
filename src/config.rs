@@ -141,6 +141,7 @@ pub struct Config {
     pub low_memory: bool,
     pub cashaccount_activation_height: u32,
     pub rpc_buffer_size: usize,
+    pub disable_full_compaction: bool,
 }
 
 /// Returns default daemon directory
@@ -276,6 +277,7 @@ impl Config {
             low_memory: config.low_memory,
             cashaccount_activation_height: config.cashaccount_activation_height as u32,
             rpc_buffer_size: config.rpc_buffer_size,
+            disable_full_compaction: config.disable_full_compaction
         };
         eprintln!("{:?}", config);
         config
@@ -320,6 +322,7 @@ debug_struct! { Config,
     low_memory,
     cashaccount_activation_height,
     rpc_buffer_size,
+    disable_full_compaction,
 }
 
 struct StaticCookie {
