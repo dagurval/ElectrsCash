@@ -262,12 +262,12 @@ impl Index {
             new_headers.iter().map(|h| (*h.hash(), h.height())),
         );
 
-        let chan = SyncChannel::new(1);
+        let chan = SyncChannel::new(10);
         let sender = chan.sender();
         let blockhashes: Vec<BlockHash> = new_headers.iter().map(|h| *h.hash()).collect();
         let batch_size = self.batch_size;
         let fetcher = spawn_thread("fetcher", move || {
-            for chunk in blockhashes.chunks(batch_size) {
+            for chunk in blockhashes.chunks(batch_size / 10) {
                 sender
                     .send(block_on(daemon.getblocks(&chunk)))
                     .expect("failed sending blocks to be indexed");
