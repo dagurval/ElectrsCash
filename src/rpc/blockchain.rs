@@ -385,4 +385,8 @@ impl BlockchainRPC {
         timer.observe_duration();
         Ok(notification)
     }
+
+    pub async fn subscription_count(&self) -> usize {
+        self.status_hashes.lock().await.len()
+    }
 }

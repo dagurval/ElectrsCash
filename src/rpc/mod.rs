@@ -329,7 +329,7 @@ impl Connection {
         }
         self.stats
             .subscriptions
-            .sub(self.status_hashes.len() as i64);
+            .sub(self.blockchainrpc.subscription_count().await as i64);
         debug!("[{}] shutting down connection", self.addr);
         let _ = self.stream.lock().await.shutdown(Shutdown::Both);
         if let Err(err) = child.join().expect("receiver panicked") {
