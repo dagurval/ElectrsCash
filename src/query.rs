@@ -384,7 +384,7 @@ impl Query {
     ) -> Result<(Transaction, Option<HeaderEntry>)> {
         let _timer = self
             .duration
-            .with_label_values(&["load_txn_with_header"])
+            .with_label_values(&["load_txn_with_blockheader"])
             .start_timer();
 
         let rawtx = self.app.daemon().gettransaction_raw(&txid, true).await?;
@@ -398,9 +398,11 @@ impl Query {
         self.tx_cache.put_serialized(txid, txserialized);
 
         // Fetch header from own data store
-        let blockhash = rawtx["blockhash"]
-            .as_str()
-            .chain_err(|| "invalid blockhash from bitcoind")?;
+        let blockhash = rawtx["blockhash"].as_str();
+        if blockhash.is_none() {
+            return Ok((tx, None))
+        }
+        let blockhash = blockhash.unwrap();
         let blockhash =
             BlockHash::from_hex(blockhash).chain_err(|| "non-hex blockhash from bitcoind")?;
         let header = self.app.index().get_header_by_blockhash(&blockhash);
