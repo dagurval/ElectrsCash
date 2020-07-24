@@ -229,7 +229,7 @@ impl Query {
             tx_cache,
             duration: metrics.histogram_vec(
                 HistogramOpts::new(
-                    "electrs_query_duration",
+                    "electrscash_query_duration",
                     "Request duration (in seconds)",
                 ),
                 &["type"],

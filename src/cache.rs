@@ -61,7 +61,7 @@ impl TransactionCache {
             &["type"],
         );
         let usage = metrics.gauge_int(MetricOpts::new(
-            "electrs_transactions_cache_size",
+            "electrscash_transactions_cache_size",
             "Cache usage for list of transactions (bytes)",
         ));
         TransactionCache {
